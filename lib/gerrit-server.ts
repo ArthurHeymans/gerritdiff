@@ -1,0 +1,115 @@
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
+
+type ParsedGerritUrl = {
+  origin: string;
+  host: string;
+  change: string;
+  revision: string;
+};
+
+type GerritAccount = {
+  name?: string;
+  display_name?: string;
+  email?: string;
+  avatars?: Array<{ url: string; height: number }>;
+};
+
+type GerritDetail = {
+  _number: number;
+  subject: string;
+  project: string;
+  branch: string;
+  status: string;
+  owner: GerritAccount;
+  current_revision: string;
+  revisions: Record<string, { _number: number }>;
+  updated: string;
+  insertions?: number;
+  deletions?: number;
+};
+
+function parseGerritUrl(input: string): ParsedGerritUrl {
+  let url: URL;
+  try {
+    url = new URL(input);
+  } catch {
+    throw new Error("Enter a valid Gerrit URL.");
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("Only HTTP(S) Gerrit URLs are supported.");
+
+  const fullPath = `${url.pathname}${url.hash}`;
+  const modern = fullPath.match(/\/\+\/(\d+)(?:\/(\d+))?/);
+  const legacy = fullPath.match(/\/(?:#\/)?c\/(\d+)(?:\/(\d+))?/);
+  const match = modern ?? legacy;
+  if (!match) throw new Error("That doesn't look like a Gerrit change URL.");
+  return { origin: url.origin, host: url.host, change: match[1], revision: match[2] ?? "current" };
+}
+
+function isPrivateAddress(address: string): boolean {
+  if (isIP(address) === 4) {
+    const [a, b] = address.split(".").map(Number);
+    return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+  }
+  const value = address.toLowerCase();
+  return value === "::1" || value === "::" || value.startsWith("fc") || value.startsWith("fd") || value.startsWith("fe80:") || value.startsWith("::ffff:127.");
+}
+
+async function assertPublicUrl(input: string) {
+  let url: URL;
+  try {
+    url = new URL(input);
+  } catch {
+    throw new Error("The remote server provided an invalid URL.");
+  }
+  const hostname = url.hostname;
+  if (hostname === "localhost" || hostname.endsWith(".local")) throw new Error("Local Gerrit hosts aren't available from the hosted viewer.");
+  const addresses = await lookup(hostname, { all: true });
+  if (!addresses.length || addresses.some(({ address }) => isPrivateAddress(address))) throw new Error("Private network addresses are not allowed.");
+}
+
+function stripXssi(text: string): string {
+  return text.replace(/^\)\]\}'\s*/, "");
+}
+
+export function parseGerritJson<T>(text: string): T {
+  try {
+    return JSON.parse(stripXssi(text)) as T;
+  } catch {
+    throw new Error("Gerrit returned an invalid response.");
+  }
+}
+
+export async function publicFetch(url: string, accept = "application/json", allowNotFound = false) {
+  await assertPublicUrl(url);
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      headers: { Accept: accept, "User-Agent": "Clanker/0.1" },
+      redirect: "error",
+      signal: AbortSignal.timeout(20_000),
+    });
+  } catch {
+    throw new Error("The Gerrit server could not be reached.");
+  }
+  if (allowNotFound && response.status === 404) return null;
+  if (!response.ok) {
+    if (response.status === 401 || response.status === 403) throw new Error("This resource is private or anonymous access is disabled.");
+    if (response.status === 404) throw new Error("Resource not found. Check the URL and its permissions.");
+    throw new Error(`Gerrit returned ${response.status}.`);
+  }
+  return response;
+}
+
+export async function resolveChange(sourceUrl: string) {
+  const parsed = parseGerritUrl(sourceUrl);
+  const detailUrl = `${parsed.origin}/changes/${encodeURIComponent(parsed.change)}/detail?o=CURRENT_REVISION`;
+  const detailResponse = await publicFetch(detailUrl);
+  if (!detailResponse) throw new Error("Change not found.");
+  const detail = parseGerritJson<GerritDetail>(await detailResponse.text());
+  const revision = parsed.revision === "current" ? detail.current_revision : parsed.revision;
+  const revisionInfo = parsed.revision === "current"
+    ? detail.revisions[detail.current_revision]
+    : Object.values(detail.revisions).find((item) => item._number === Number(parsed.revision));
+  return { parsed, detail, revision, revisionNumber: revisionInfo?._number ?? (Number(parsed.revision) || 0) };
+}

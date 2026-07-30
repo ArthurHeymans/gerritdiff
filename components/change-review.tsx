@@ -16,8 +16,8 @@ import {
 import { CodeView, type CodeViewHandle } from "@pierre/diffs/react";
 import type { GitStatus, GitStatusEntry } from "@pierre/trees";
 import { FileTree, useFileTree } from "@pierre/trees/react";
-import { ChevronDown, FileText, GitBranch, LoaderCircle, MessageSquare, Send, Trash2, X } from "lucide-react";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { ChevronDown, Columns2, FileText, GitBranch, LoaderCircle, MessageSquare, Rows3, Send, Trash2, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RepositoryBrowser } from "@/components/repository-browser";
 import type { ChangeData } from "@/lib/types";
 import type { ClankerTheme } from "@/lib/theme";
@@ -185,6 +185,7 @@ export function ChangeReview({ data, theme }: { data: ChangeData; theme: Clanker
   const nextCommentRef = useRef(1);
   const [selectedLines, setSelectedLines] = useState<CodeViewLineSelection | null>(null);
   const [commentCount, setCommentCount] = useState(0);
+  const [diffStyle, setDiffStyle] = useState<"split" | "unified">("split");
   const [sidebarMode, setSidebarMode] = useState<"changed" | "repository">("changed");
   const [knownPath, setKnownPath] = useState("");
   const [repositoryError, setRepositoryError] = useState("");
@@ -202,6 +203,15 @@ export function ChangeReview({ data, theme }: { data: ChangeData; theme: Clanker
     () => new Map(files.map((file, index) => [file.name, `file-${index}`])),
     [files],
   );
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(max-width: 767px)");
+    const updateForViewport = (matches: boolean) => setDiffStyle(matches ? "unified" : "split");
+    const handleChange = (event: MediaQueryListEvent) => updateForViewport(event.matches);
+    updateForViewport(mediaQuery.matches);
+    mediaQuery.addEventListener("change", handleChange);
+    return () => mediaQuery.removeEventListener("change", handleChange);
+  }, []);
 
   const updateDiffItem = useCallback((itemId: string, update: (item: CodeViewDiffItem<CommentMetadata>) => boolean) => {
     const viewer = viewerRef.current;
@@ -273,7 +283,7 @@ export function ChangeReview({ data, theme }: { data: ChangeData; theme: Clanker
     layout: { paddingTop: 0, gap: 1, paddingBottom: 0 },
     themeType: theme,
     theme: theme === "dark" ? "pierre-dark" : "pierre-light",
-    diffStyle: "unified",
+    diffStyle,
     diffIndicators: "bars",
     overflow: "scroll",
     lineDiffType: "word-alt",
@@ -285,7 +295,7 @@ export function ChangeReview({ data, theme }: { data: ChangeData; theme: Clanker
     onGutterUtilityClick(range, context) {
       if (context.item.type === "diff") createDraft(range, context.item.id);
     },
-  }), [createDraft, theme]);
+  }), [createDraft, diffStyle, theme]);
 
   const renderAnnotation = useCallback((annotation: DiffLineAnnotation<CommentMetadata> | LineAnnotation<CommentMetadata>, item: CodeViewItem<CommentMetadata>) => {
     if (!("side" in annotation) || item.type !== "diff" || !annotation.metadata) return null;
@@ -426,6 +436,16 @@ export function ChangeReview({ data, theme }: { data: ChangeData; theme: Clanker
           <span><strong>{files.length}</strong> files changed</span>
           <span className="comment-hint"><MessageSquare size={13} /> Select lines or click <b>+</b> in the gutter to comment</span>
           {commentCount > 0 && <span className="comment-count">{commentCount} local comment{commentCount === 1 ? "" : "s"}</span>}
+          <button
+            type="button"
+            className="diff-style-toggle"
+            title={diffStyle === "split" ? "Switch to unified view" : "Switch to side-by-side view"}
+            aria-label={diffStyle === "split" ? "Switch to unified view" : "Switch to side-by-side view"}
+            onClick={() => setDiffStyle((current) => current === "split" ? "unified" : "split")}
+          >
+            {diffStyle === "split" ? <Columns2 size={14} /> : <Rows3 size={14} />}
+            <span>{diffStyle === "split" ? "Side by side" : "Unified"}</span>
+          </button>
           <span className="summary-add">+{data.insertions}</span>
           <span className="summary-del">−{data.deletions}</span>
         </div>

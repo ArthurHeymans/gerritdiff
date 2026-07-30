@@ -34,6 +34,7 @@ type CommentMetadata =
   | { kind: "existing"; key: string; range: SelectedLineRange; textRange?: GerritTextRange; thread: DiscussionThread };
 
 type ActiveDraft = { itemId: string; key: string };
+type RightPanel = { kind: "relation" } | { kind: "scope"; path: string } | { kind: "discussion"; threadKey: string } | null;
 type LocalReply = { key: string; message: string; resolved: boolean };
 type LocalReviewComment = { key: string; path: string; message: string; range: SelectedLineRange; textRange?: GerritTextRange; inReplyTo?: string; unresolved?: boolean };
 type CodeTextSelection = { itemId: string; range: SelectedLineRange; textRange: GerritTextRange; top: number; left: number };
@@ -683,13 +684,12 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
   const [loadingItems, setLoadingItems] = useState<ReadonlySet<string>>(() => new Set());
   const [localReplies, setLocalReplies] = useState<LocalReply[]>([]);
   const [localReviewComments, setLocalReviewComments] = useState<LocalReviewComment[]>([]);
-  const [activeThreadKey, setActiveThreadKey] = useState<string | null>(null);
-  // null = closed; otherwise the path whose unanchored comments the panel shows
-  // ("/PATCHSET_LEVEL" for change-wide, or a file path for file-level).
-  const [commentScope, setCommentScope] = useState<string | null>(null);
+  const [rightPanel, setRightPanel] = useState<RightPanel>(null);
+  const activeThreadKey = rightPanel?.kind === "discussion" ? rightPanel.threadKey : null;
+  const commentScope = rightPanel?.kind === "scope" ? rightPanel.path : null;
+  const relationPanelOpen = rightPanel?.kind === "relation";
   const openedInitialThreadRef = useRef<string | null>(null);
   const [scopeDraft, setScopeDraft] = useState<{ key: string | null; message: string; resolved: boolean } | null>(null);
-  const [relationPanelOpen, setRelationPanelOpen] = useState(false);
   const [publishOpen, setPublishOpen] = useState(false);
   const [sshUser, setSshUser] = useState("");
   const [sshHost, setSshHost] = useState(data.host);
@@ -776,7 +776,7 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
       setSidebarCollapsed(settings.sidebarCollapsed ?? false);
       if (settings.sidebarMode === "repository" || settings.sidebarMode === "discussion") setSidebarMode(settings.sidebarMode);
       else setSidebarMode("changed");
-      setRelationPanelOpen(false);
+      setRightPanel(null);
     });
     return () => cancelAnimationFrame(frame);
   }, [data.host, data.project]);
@@ -1084,16 +1084,14 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
   }, []);
 
   const toggleActiveDiscussion = useCallback((key: string) => {
-    setActiveThreadKey((current) => {
-      const next = current === key ? null : key;
-      if (next) {
-        setRelationPanelOpen(false);
-        setCommentScope(null);
-        updateThreadUrl(next.replace(/^gerrit:/, ""));
-      } else updateThreadUrl();
-      return next;
-    });
-  }, [updateThreadUrl]);
+    if (activeThreadKey === key) {
+      setRightPanel(null);
+      updateThreadUrl();
+      return;
+    }
+    setRightPanel({ kind: "discussion", threadKey: key });
+    updateThreadUrl(key.replace(/^gerrit:/, ""));
+  }, [activeThreadKey, updateThreadUrl]);
 
   const localReplyComments = useMemo<LocalReviewComment[]>(() => localReplies.flatMap((reply) => {
     const thread = discussionThreads.find((candidate) => `gerrit:${candidate.id}` === reply.key);
@@ -1135,12 +1133,10 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
   );
 
   const openCommentScope = useCallback((path: string | null) => {
-    setRelationPanelOpen(false);
-    setActiveThreadKey(null);
     setScopeDraft(null);
     updateThreadUrl();
-    setCommentScope((current) => current === path ? null : path);
-  }, [updateThreadUrl]);
+    setRightPanel(commentScope === path || path === null ? null : { kind: "scope", path });
+  }, [commentScope, updateThreadUrl]);
 
   const saveScopeComment = useCallback((path: string, key: string | null, message: string, resolved: boolean) => {
     const entryKey = key ?? `scope-${nextCommentRef.current++}`;
@@ -1247,9 +1243,7 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
 
   const selectDiscussion = useCallback(async (thread: DiscussionThread) => {
     const key = `gerrit:${thread.id}`;
-    setRelationPanelOpen(false);
-    setCommentScope(null);
-    setActiveThreadKey(key);
+    setRightPanel({ kind: "discussion", threadKey: key });
     updateThreadUrl(thread.id);
 
     // Preserve the selected thread in the URL when its patchset must be loaded.
@@ -1388,8 +1382,7 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
         }
       : undefined);
 
-  const discussionPanelVisible = commentScope !== null || Boolean(activePanelAnnotation);
-  const sidePanelVisible = relationPanelOpen || discussionPanelVisible;
+  const sidePanelVisible = rightPanel !== null;
 
   return (
     <div className={`review-layout${sidebarCollapsed ? " sidebar-collapsed" : ""}${sidePanelVisible ? " with-discussion-panel" : ""}`}>
@@ -1452,10 +1445,8 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
               aria-expanded={relationPanelOpen}
               title={`${data.relationChain.length} change${data.relationChain.length === 1 ? "" : "s"} in the relation chain`}
               onClick={() => {
-                setCommentScope(null);
-                setActiveThreadKey(null);
                 updateThreadUrl();
-                setRelationPanelOpen((open) => !open);
+                setRightPanel(relationPanelOpen ? null : { kind: "relation" });
               }}
             >
               <GitBranch size={12} />
@@ -1582,7 +1573,7 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
                   ? `${commentScope === "/PATCHSET_LEVEL" ? `Patchset ${data.revisionNumber}` : commentScope} · ${scopeThreads.length} thread${scopeThreads.length === 1 ? "" : "s"}${scopeDrafts.length ? `, ${scopeDrafts.length} draft` : ""}`
                   : `${activeThread?.comments.length ?? 0} comment${activeThread?.comments.length === 1 ? "" : "s"}`}</strong>
             </div>
-            <button type="button" onClick={() => { setRelationPanelOpen(false); setCommentScope(null); setActiveThreadKey(null); updateThreadUrl(); }} aria-label="Close side panel"><X size={15} /></button>
+            <button type="button" onClick={() => { setRightPanel(null); updateThreadUrl(); }} aria-label="Close side panel"><X size={15} /></button>
           </div>
           <div className={`discussion-panel-body${commentScope && !relationPanelOpen ? " patchset-discussion-list" : ""}`}>
             {relationPanelOpen ? <RelationChainPanel relations={data.relationChain} /> : null}
@@ -1658,7 +1649,7 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
                 annotation={activePanelAnnotation}
                 expanded
                 localReply={localReplies.find((reply) => reply.key === activeThreadKey)}
-                onToggle={() => { setActiveThreadKey(null); updateThreadUrl(); }}
+                onToggle={() => { setRightPanel(null); updateThreadUrl(); }}
                 onSaveReply={saveLocalReply}
                 onDeleteReply={deleteLocalReply}
               />

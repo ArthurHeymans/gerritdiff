@@ -206,5 +206,5 @@ export function GerritDiffApp() {
   const url = searchParams.get("url");
   const base = searchParams.get("base") ?? undefined;
   const threadId = searchParams.get("thread") ?? undefined;
-  return url ? <ChangeLoader key={`${url}:${base ?? "parent"}:${threadId ?? "no-thread"}`} url={url} base={base} threadId={threadId} /> : <Landing />;
+  return url ? <ChangeLoader key={`${url}:${base ?? "parent"}`} url={url} base={base} threadId={threadId} /> : <Landing />;
 }

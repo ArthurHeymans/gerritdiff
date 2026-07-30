@@ -39,3 +39,10 @@ GerritDiff currently supports anonymously readable changes. Private Gerrit
 authentication is intentionally not included in the first version. Full repository
 tree browsing requires the Gerrit project to advertise a Gitiles web link; known
 file paths can still be opened directly through Gerrit's commit content API.
+
+## License
+
+Licensed under either of the following, at your option:
+
+- [Apache License, Version 2.0](LICENSE-APACHE)
+- [MIT License](LICENSE-MIT)

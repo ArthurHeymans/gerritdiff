@@ -24,7 +24,7 @@ import { RepositoryBrowser } from "@/components/repository-browser";
 import type { ChangeData, GerritComment, RelatedChange } from "@/lib/types";
 import type { GerritDiffTheme } from "@/lib/theme";
 
-type DiscussionThread = { id: string; path: string; comments: GerritComment[] };
+type DiscussionThread = { key: string; id: string; path: string; comments: GerritComment[] };
 
 type GerritTextRange = { start_line: number; start_character: number; end_line: number; end_character: number };
 
@@ -156,23 +156,43 @@ function gitStatusFor(file: FileDiffMetadata): GitStatus {
   return "modified";
 }
 
+function commentInstanceKey(comment: GerritComment) {
+  const range = comment.range;
+  return JSON.stringify([
+    comment.id,
+    comment.path,
+    comment.line ?? null,
+    range?.startLine ?? null,
+    range?.startCharacter ?? null,
+    range?.endLine ?? null,
+    range?.endCharacter ?? null,
+  ]);
+}
+
 function buildDiscussionThreads(comments: GerritComment[]): DiscussionThread[] {
-  const byId = new Map(comments.map((comment) => [comment.id, comment]));
-  const grouped = new Map<string, GerritComment[]>();
+  const byId = new Map<string, GerritComment[]>();
+  for (const comment of comments) byId.set(comment.id, [...(byId.get(comment.id) ?? []), comment]);
+  const grouped = new Map<string, { id: string; comments: GerritComment[] }>();
   for (const comment of comments) {
     let root = comment;
     const visited = new Set([comment.id]);
     while (root.inReplyTo) {
-      const parent = byId.get(root.inReplyTo);
+      const candidates = byId.get(root.inReplyTo) ?? [];
+      // Copied files can produce several ported instances with the same UUID.
+      // Follow the parent at this instance's path rather than collapsing them.
+      const parent = candidates.find((candidate) => candidate.path === root.path) ?? candidates[0];
       if (!parent || visited.has(parent.id)) break;
       visited.add(parent.id);
       root = parent;
     }
-    grouped.set(root.id, [...(grouped.get(root.id) ?? []), comment]);
+    const key = commentInstanceKey(root);
+    const group = grouped.get(key) ?? { id: root.id, comments: [] };
+    group.comments.push(comment);
+    grouped.set(key, group);
   }
-  return [...grouped.entries()].map(([id, threadComments]) => {
-    const sorted = threadComments.toSorted((a, b) => a.updated.localeCompare(b.updated));
-    return { id, path: sorted[0]?.path ?? "/PATCHSET_LEVEL", comments: sorted };
+  return [...grouped.entries()].map(([key, group]) => {
+    const sorted = group.comments.toSorted((a, b) => a.updated.localeCompare(b.updated));
+    return { key, id: group.id, path: sorted[0]?.path ?? "/PATCHSET_LEVEL", comments: sorted };
   }).toSorted((a, b) => (b.comments.at(-1)?.updated ?? "").localeCompare(a.comments.at(-1)?.updated ?? ""));
 }
 
@@ -620,7 +640,7 @@ function DiscussionSidebar({ threads, revisionNumber, onSelect }: { threads: Dis
     const latest = thread.comments.at(-1);
     const patchset = threadPatchset(thread) ?? latest?.patchSet ?? revisionNumber;
     return (
-      <button className={latest?.unresolved ? "sidebar-thread-unresolved" : "sidebar-thread-resolved"} key={thread.id} onClick={() => onSelect(thread)}>
+      <button className={latest?.unresolved ? "sidebar-thread-unresolved" : "sidebar-thread-resolved"} key={thread.key} onClick={() => onSelect(thread)}>
         <span className="discussion-path">{thread.path === "/PATCHSET_LEVEL" ? "Patchset-level comment" : thread.path}{threadIsFileLevel(thread) ? " · whole file" : ""}</span>
         <span className="discussion-author"><strong>{thread.comments[0]?.author.name}</strong><i>{latest?.unresolved ? "Unresolved" : "Resolved"}</i></span>
         <p>{commentSummary(thread.comments[0]?.message ?? "")}</p>
@@ -799,7 +819,7 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
           const range = commentRange(anchor);
           return [{
             lineNumber: range.end,
-            metadata: { kind: "existing", key: `gerrit:${thread.id}`, range, textRange: commentTextRange(anchor), thread },
+            metadata: { kind: "existing", key: `gerrit:${thread.key}`, range, textRange: commentTextRange(anchor), thread },
           }];
         }),
       }] : []),
@@ -812,7 +832,7 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
           annotations.push({
             side: range.side ?? "additions",
             lineNumber: range.end,
-            metadata: { kind: "existing", key: `gerrit:${thread.id}`, range, textRange: commentTextRange(anchor), thread },
+            metadata: { kind: "existing", key: `gerrit:${thread.key}`, range, textRange: commentTextRange(anchor), thread },
           });
         }
         return { id: `file-${index}`, type: "diff" as const, fileDiff, annotations };
@@ -1147,11 +1167,12 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
       return;
     }
     setRightPanel({ kind: "discussion", threadKey: key });
-    updateThreadUrl(key.replace(/^gerrit:/, ""));
-  }, [activeThreadKey, updateThreadUrl]);
+    const thread = discussionThreads.find((candidate) => `gerrit:${candidate.key}` === key);
+    updateThreadUrl(thread?.key);
+  }, [activeThreadKey, discussionThreads, updateThreadUrl]);
 
   const localReplyComments = useMemo<LocalReviewComment[]>(() => localReplies.flatMap((reply) => {
-    const thread = discussionThreads.find((candidate) => `gerrit:${candidate.id}` === reply.key);
+    const thread = discussionThreads.find((candidate) => `gerrit:${candidate.key}` === reply.key);
     const anchor = thread ? threadAnchor(thread, data.revisionNumber) ?? thread.comments[0] : undefined;
     const latestPublished = thread?.comments.findLast((comment) => !comment.id.startsWith("local-reply-"));
     if (!anchor || !latestPublished) return [];
@@ -1331,15 +1352,15 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
   }, [data.revision, data.sourceUrl, loadingItems]);
 
   const selectDiscussion = useCallback(async (thread: DiscussionThread) => {
-    const key = `gerrit:${thread.id}`;
+    const key = `gerrit:${thread.key}`;
     setRightPanel({ kind: "discussion", threadKey: key });
-    updateThreadUrl(thread.id);
+    updateThreadUrl(thread.key);
 
     // Preserve the selected thread in the URL when its patchset must be loaded.
     if (!threadBelongsToPatchset(thread, data.revisionNumber)) {
       const patchset = threadPatchset(thread) ?? thread.comments.at(-1)?.patchSet;
       if (patchset && patchset !== data.revisionNumber) {
-        onPatchsetChange(patchset, thread.id);
+        onPatchsetChange(patchset, thread.key);
         return;
       }
     }
@@ -1362,7 +1383,10 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
 
   useEffect(() => {
     if (!initialThreadId || openedInitialThreadRef.current === initialThreadId) return;
-    const thread = discussionThreads.find((candidate) => candidate.id === initialThreadId);
+    // Older/shared URLs may contain the Gerrit UUID; newer URLs use the
+    // instance key so duplicate ported locations remain independently linkable.
+    const thread = discussionThreads.find((candidate) => candidate.key === initialThreadId)
+      ?? discussionThreads.find((candidate) => candidate.id === initialThreadId);
     if (!thread) return;
     const frame = requestAnimationFrame(() => {
       openedInitialThreadRef.current = initialThreadId;
@@ -1440,19 +1464,19 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
   const reviewers = data.reviewers ?? [];
   const voteText = (value: number | undefined) => value === undefined ? "—" : value > 0 ? `+${value}` : String(value);
   const voteClass = (value: number | undefined) => value === undefined || value === 0 ? "neutral" : value > 0 ? "positive" : "negative";
-  const activeThread = activeThreadKey ? discussionThreads.find((thread) => `gerrit:${thread.id}` === activeThreadKey) : undefined;
+  const activeThread = activeThreadKey ? discussionThreads.find((thread) => `gerrit:${thread.key}` === activeThreadKey) : undefined;
   const activeAnchor = activeThread ? threadAnchor(activeThread, data.revisionNumber) : undefined;
   const activeRange = activeAnchor ? commentRange(activeAnchor) : undefined;
   const activeAnnotation: DiffLineAnnotation<CommentMetadata> | LineAnnotation<CommentMetadata> | undefined = activeThread && activeAnchor && activeRange
     ? activeAnchor.path === "/COMMIT_MSG"
       ? {
           lineNumber: activeRange.end,
-          metadata: { kind: "existing", key: `gerrit:${activeThread.id}`, range: activeRange, textRange: commentTextRange(activeAnchor), thread: activeThread },
+          metadata: { kind: "existing", key: `gerrit:${activeThread.key}`, range: activeRange, textRange: commentTextRange(activeAnchor), thread: activeThread },
         }
       : {
           side: activeRange.side ?? "additions",
           lineNumber: activeRange.end,
-          metadata: { kind: "existing", key: `gerrit:${activeThread.id}`, range: activeRange, textRange: commentTextRange(activeAnchor), thread: activeThread },
+          metadata: { kind: "existing", key: `gerrit:${activeThread.key}`, range: activeRange, textRange: commentTextRange(activeAnchor), thread: activeThread },
         }
     : undefined;
 
@@ -1464,7 +1488,7 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
           lineNumber: 0,
           metadata: {
             kind: "existing",
-            key: `gerrit:${activeThread.id}`,
+            key: `gerrit:${activeThread.key}`,
             range: commentRange(activeThread.comments[0]),
             thread: activeThread,
           },
@@ -1670,14 +1694,14 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
               const range = commentRange(thread.comments[0]);
               const annotation: LineAnnotation<CommentMetadata> = {
                 lineNumber: 0,
-                metadata: { kind: "existing", key: `gerrit:${thread.id}`, range, thread },
+                metadata: { kind: "existing", key: `gerrit:${thread.key}`, range, thread },
               };
               return (
                 <ExistingDiscussion
-                  key={thread.id}
+                  key={thread.key}
                   annotation={annotation}
                   expanded
-                  localReply={localReplies.find((reply) => reply.key === `gerrit:${thread.id}`)}
+                  localReply={localReplies.find((reply) => reply.key === `gerrit:${thread.key}`)}
                   onToggle={() => undefined}
                   onSaveReply={saveLocalReply}
                   onDeleteReply={deleteLocalReply}

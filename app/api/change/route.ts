@@ -149,7 +149,7 @@ export async function GET(request: NextRequest) {
     const commitSubject = selectedRevision?.commit?.subject?.trim() || commitMessage.split(/\r?\n/, 1)[0]?.trim() || detail.subject;
     // /COMMIT_MSG header, per Gerrit's MagicFile#forCommitMessage: one line per parent
     // (none for a root commit), Author, AuthorDate, Commit, CommitDate, then a blank line.
-    const commitMessageLineOffset = (selectedRevision?.commit?.parents?.length ?? 1) + 5;
+    const commitMessageLineOffset = (selectedRevision?.commit?.parents?.length ?? 0) + 5;
     const baseRevisionNumber = requestedBase ? Number(requestedBase) : undefined;
     const baseRevision = baseRevisionNumber === undefined
       ? undefined
@@ -158,7 +158,7 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "Invalid comparison patchset." }, { status: 400 });
     }
     const baseCommitMessageLineOffset = baseRevision
-      ? (baseRevision.commit?.parents?.length ?? 1) + 5
+      ? (baseRevision.commit?.parents?.length ?? 0) + 5
       : undefined;
     const changePath = `${parsed.origin}/changes/${encodeURIComponent(parsed.change)}`;
     const revisionPath = `${changePath}/revisions/${encodeURIComponent(revision)}`;
@@ -183,16 +183,23 @@ export async function GET(request: NextRequest) {
     const portedComments = portedCommentsResponse
       ? normalizeComments(parseGerritJson<GerritComments>(await portedCommentsResponse.text()), parsed.origin, true)
       : [];
-    const commentsById = new Map(allComments.map((comment) => [comment.id, comment]));
-    for (const comment of portedComments) {
-      const original = commentsById.get(comment.id);
-      commentsById.set(comment.id, {
-        ...original,
-        ...comment,
-        contextLines: comment.contextLines ?? original?.contextLines,
-        unresolved: original?.unresolved ?? comment.unresolved,
-      });
-    }
+    const originalsById = new Map(allComments.map((comment) => [comment.id, comment]));
+    const portedIds = new Set(portedComments.map((comment) => comment.id));
+    // A copied file can produce multiple ported locations with the same Gerrit UUID.
+    // Keep every location; the original is replaced only while its ported instances
+    // represent it on the selected revision.
+    const comments = [
+      ...allComments.filter((comment) => !portedIds.has(comment.id)),
+      ...portedComments.map((comment) => {
+        const original = originalsById.get(comment.id);
+        return {
+          ...original,
+          ...comment,
+          contextLines: comment.contextLines ?? original?.contextLines,
+          unresolved: original?.unresolved ?? comment.unresolved,
+        };
+      }),
+    ];
 
     const relatedChanges = relatedResponse
       ? parseGerritJson<GerritRelatedChanges>(await relatedResponse.text()).changes
@@ -297,7 +304,7 @@ export async function GET(request: NextRequest) {
       insertions: comparison?.insertions ?? fileStats?.insertions ?? detail.insertions ?? 0,
       deletions: comparison?.deletions ?? fileStats?.deletions ?? detail.deletions ?? 0,
       patch,
-      comments: [...commentsById.values()].toSorted((a, b) => a.updated.localeCompare(b.updated)),
+      comments: comments.toSorted((a, b) => a.updated.localeCompare(b.updated)),
       relationChain,
     };
 

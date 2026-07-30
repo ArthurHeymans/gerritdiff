@@ -17,7 +17,7 @@ import {
 import { CodeView, type CodeViewHandle, WorkerPoolContextProvider } from "@pierre/diffs/react";
 import type { GitStatus, GitStatusEntry } from "@pierre/trees";
 import { FileTree, useFileTree } from "@pierre/trees/react";
-import { Check, ChevronDown, CircleCheck, Columns2, Copy, FileText, GitBranch, LoaderCircle, MessageSquare, PanelLeftClose, PanelLeftOpen, Quote, Reply, Rows3, Send, Terminal, Trash2, X } from "lucide-react";
+import { Check, ChevronDown, CircleCheck, Columns2, Copy, FileText, GitBranch, LoaderCircle, MessageSquare, PanelLeftClose, PanelLeftOpen, Pilcrow, Quote, Reply, Rows3, Send, Terminal, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RepositoryBrowser } from "@/components/repository-browser";
 import type { ChangeData, GerritComment, RelatedChange } from "@/lib/types";
@@ -79,6 +79,40 @@ function nextVersion(item: CodeViewItem<CommentMetadata>) {
 
 function isDiffItem(item: CodeViewItem<CommentMetadata>): item is CodeViewDiffItem<CommentMetadata> {
   return item.type === "diff";
+}
+
+function updateWhitespaceMarkers(root: HTMLElement | ShadowRoot, visible: boolean) {
+  const markerRoot = root instanceof ShadowRoot ? root.host : root;
+  markerRoot.toggleAttribute("data-show-whitespace", visible);
+  if (!visible) return;
+
+  const lines = root instanceof HTMLElement && root.matches("[data-line]")
+    ? [root]
+    : Array.from(root.querySelectorAll<HTMLElement>("[data-line]"));
+  for (const line of lines) {
+    const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT);
+    const textNodes: Text[] = [];
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (node.parentElement?.closest("[data-whitespace-marker]")) continue;
+      if (/[ \t]/.test(node.textContent ?? "")) textNodes.push(node as Text);
+    }
+    for (const textNode of textNodes) {
+      const text = textNode.data;
+      const fragment = document.createDocumentFragment();
+      for (const part of text.split(/( +|\t)/)) {
+        if (!part) continue;
+        if (part === "\t" || /^ +$/.test(part)) {
+          const marker = document.createElement("span");
+          marker.dataset.whitespaceMarker = part === "\t" ? "tab" : "space";
+          marker.textContent = part;
+          fragment.append(marker);
+        } else {
+          fragment.append(part);
+        }
+      }
+      textNode.replaceWith(fragment);
+    }
+  }
 }
 
 function gitStatusFor(file: FileDiffMetadata): GitStatus {
@@ -557,6 +591,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   const [codeTextSelection, setCodeTextSelection] = useState<CodeTextSelection | null>(null);
   const [commentCount, setCommentCount] = useState(0);
   const [diffStyle, setDiffStyle] = useState<"split" | "unified">("split");
+  const [showWhitespace, setShowWhitespace] = useState(false);
   const [sidebarMode, setSidebarMode] = useState<"changed" | "repository" | "discussion">("changed");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [knownPath, setKnownPath] = useState("");
@@ -862,6 +897,17 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     setSelectedLines((current) => current?.id === selection.id && areSelectionsEqual(current.range, selection.range) ? null : selection);
   }, []);
 
+  const renderWhitespaceMarkers = useCallback((node: HTMLElement) => {
+    updateWhitespaceMarkers(node, showWhitespace);
+  }, [showWhitespace]);
+
+  useEffect(() => {
+    for (const rendered of viewerRef.current?.getInstance()?.getRenderedItems() ?? []) {
+      const root = rendered.element.shadowRoot;
+      if (root) updateWhitespaceMarkers(root, showWhitespace);
+    }
+  }, [showWhitespace]);
+
   const options = useMemo<CodeViewOptions<CommentMetadata>>(() => ({
     layout: { paddingTop: 0, gap: 1, paddingBottom: 0 },
     themeType: theme,
@@ -875,11 +921,17 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     enableGutterUtility: true,
     stickyHeaders: true,
     hunkSeparators: "line-info-basic",
-    unsafeCSS: `::highlight(${COMMENT_HIGHLIGHT_NAME}) { background-color: rgba(231, 177, 54, .38); text-decoration: underline 1px rgba(245, 198, 83, .9); text-underline-offset: 2px; }`,
+    unsafeCSS: `
+      ::highlight(${COMMENT_HIGHLIGHT_NAME}) { background-color: rgba(231, 177, 54, .38); text-decoration: underline 1px rgba(245, 198, 83, .9); text-underline-offset: 2px; }
+      :is(:host([data-show-whitespace]), [data-show-whitespace]) [data-whitespace-marker="space"] { color: transparent; background-image: radial-gradient(circle, color-mix(in srgb, var(--diffs-fg) 42%, transparent) 1px, transparent 1.2px); background-position: .5ch center; background-repeat: repeat-x; background-size: 1ch 100%; }
+      :is(:host([data-show-whitespace]), [data-show-whitespace]) [data-whitespace-marker="tab"] { position: relative; color: transparent; }
+      :is(:host([data-show-whitespace]), [data-show-whitespace]) [data-whitespace-marker="tab"]::before { content: "→"; position: absolute; inset-inline-start: 0; color: color-mix(in srgb, var(--diffs-fg) 48%, transparent); pointer-events: none; }
+    `,
+    onPostRender: renderWhitespaceMarkers,
     onGutterUtilityClick(range, context) {
       createDraft(range, context.item.id);
     },
-  }), [createDraft, diffStyle, theme]);
+  }), [createDraft, diffStyle, renderWhitespaceMarkers, theme]);
 
   const addDiscussionReply = useCallback((itemId: string, key: string, message: string, resolved: boolean) => {
     const timestamp = new Date().toISOString();
@@ -1244,6 +1296,17 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
           </button>
           <button type="button" className="publish-review-button" onClick={openPublishDialog}>
             <Terminal size={13} /> Publish review
+          </button>
+          <button
+            type="button"
+            className={`whitespace-toggle${showWhitespace ? " active" : ""}`}
+            title={showWhitespace ? "Hide whitespace characters" : "Show spaces and tabs"}
+            aria-label={showWhitespace ? "Hide whitespace characters" : "Show spaces and tabs"}
+            aria-pressed={showWhitespace}
+            onClick={() => setShowWhitespace((current) => !current)}
+          >
+            <Pilcrow size={14} />
+            <span>Whitespace</span>
           </button>
           <button
             type="button"

@@ -690,7 +690,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   const [commentScope, setCommentScope] = useState<string | null>(null);
   const pendingThreadRef = useRef<{ key: string; patchset: number } | null>(null);
   const [scopeDraft, setScopeDraft] = useState<{ key: string | null; message: string; resolved: boolean } | null>(null);
-  const [relationPanelOpen, setRelationPanelOpen] = useState(data.relationChain.length > 1);
+  const [relationPanelOpen, setRelationPanelOpen] = useState(false);
   const [publishOpen, setPublishOpen] = useState(false);
   const [sshUser, setSshUser] = useState("");
   const [sshHost, setSshHost] = useState(data.host);
@@ -777,7 +777,8 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
       setSidebarCollapsed(settings.sidebarCollapsed ?? false);
       if (settings.sidebarMode === "repository" || settings.sidebarMode === "discussion") setSidebarMode(settings.sidebarMode);
       else setSidebarMode("changed");
-      setRelationPanelOpen(settings.rightPanelOpen ?? data.relationChain.length > 1);
+      const isMobile = window.matchMedia("(max-width: 800px)").matches;
+      setRelationPanelOpen(!isMobile && (settings.rightPanelOpen ?? data.relationChain.length > 1));
     });
     return () => cancelAnimationFrame(frame);
   }, [data.host, data.project, data.relationChain.length]);
@@ -1418,6 +1419,9 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
               <span>{data.project}</span><span>/</span><span>change {data.changeNumber}</span>
             </div>
             <h1 title={data.subject}>{data.subject}</h1>
+            <button type="button" className="publish-review-button header-review-button" onClick={openPublishDialog} title="Publish review" aria-label="Publish review">
+              <Send size={13} /> <span>Publish review</span>
+            </button>
           </div>
           <div className="change-meta">
             <span className="avatar" style={data.owner.avatarUrl ? { backgroundImage: `url(${data.owner.avatarUrl})` } : undefined}>{data.owner.avatarUrl ? null : initials}</span>
@@ -1426,14 +1430,14 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
             <span className="separator">•</span>
             <GitBranch size={14} /><code>{data.branch}</code>
             <div className="patchset-picker">
-              <span>Patchset</span>
-              <select aria-label="Target patchset" value={data.revisionNumber} onChange={(event) => onPatchsetChange(Number(event.target.value))}>
-                {data.revisions.map((revision) => <option key={revision.revision} value={revision.number}>{revision.number}{revision.number === data.revisions.at(-1)?.number ? " (latest)" : ""}</option>)}
-              </select>
-              <small>against</small>
+              <span>Base</span>
               <select aria-label="Base patchset" value={data.baseRevisionNumber ?? "parent"} onChange={(event) => onBaseChange(event.target.value === "parent" ? undefined : Number(event.target.value))}>
                 <option value="parent">Parent</option>
                 {data.revisions.filter((revision) => revision.number !== data.revisionNumber).map((revision) => <option key={revision.revision} value={revision.number}>{revision.number}</option>)}
+              </select>
+              <small>to patchset</small>
+              <select aria-label="Target patchset" value={data.revisionNumber} onChange={(event) => onPatchsetChange(Number(event.target.value))}>
+                {data.revisions.map((revision) => <option key={revision.revision} value={revision.number}>{revision.number}{revision.number === data.revisions.at(-1)?.number ? " (latest)" : ""}</option>)}
               </select>
             </div>
             <button
@@ -1482,8 +1486,12 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
                 <span className="reviewer-chip" key={reviewer.email ?? `${reviewer.name}:${index}`} title={reviewer.email}>
                   <span className="reviewer-avatar">{reviewer.avatarUrl ? <Image src={reviewer.avatarUrl} alt="" width={19} height={19} unoptimized /> : reviewerInitials}</span>
                   <strong>{reviewer.name}</strong>
-                  <span className={`reviewer-vote ${voteClass(reviewer.codeReview)}`} title={`Code-Review ${voteText(reviewer.codeReview)}`} aria-label={`Code-Review ${voteText(reviewer.codeReview)}`}>CR {voteText(reviewer.codeReview)}</span>
-                  <span className={`reviewer-vote verified ${voteClass(reviewer.verified)}`} title={`Verified ${voteText(reviewer.verified)}`} aria-label={`Verified ${voteText(reviewer.verified)}`}>V {voteText(reviewer.verified)}</span>
+                  {reviewer.codeReview !== undefined && reviewer.codeReview !== 0 && (
+                    <span className={`reviewer-vote ${voteClass(reviewer.codeReview)}`} title={`Code-Review ${voteText(reviewer.codeReview)}`} aria-label={`Code-Review ${voteText(reviewer.codeReview)}`}>CR {voteText(reviewer.codeReview)}</span>
+                  )}
+                  {reviewer.verified !== undefined && reviewer.verified !== 0 && (
+                    <span className={`reviewer-vote verified ${voteClass(reviewer.verified)}`} title={`Verified ${voteText(reviewer.verified)}`} aria-label={`Verified ${voteText(reviewer.verified)}`}>V {voteText(reviewer.verified)}</span>
+                  )}
                 </span>
               );
             }) : <span className="reviewers-empty">No current reviewers</span>}
@@ -1494,9 +1502,6 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
           <span><strong>{files.length}</strong> files changed</span>
           <span className="comment-hint"><MessageSquare size={13} /> Select lines or click <b>+</b> in the gutter to comment</span>
           {localCommentCount > 0 && <span className="comment-count">{localCommentCount} local comment{localCommentCount === 1 ? "" : "s"}</span>}
-          <button type="button" className="publish-review-button" onClick={openPublishDialog}>
-            <Terminal size={13} /> Publish review
-          </button>
           <details className="view-settings">
             <summary title="Diff display settings">
               <Settings2 size={14} />

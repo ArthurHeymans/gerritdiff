@@ -9,11 +9,12 @@ import {
   type FileDiffMetadata,
   type LineAnnotation,
   type SelectedLineRange,
+  DEFAULT_THEMES,
   areSelectionsEqual,
   parseDiffFromFile,
   parsePatchFiles,
 } from "@pierre/diffs";
-import { CodeView, type CodeViewHandle } from "@pierre/diffs/react";
+import { CodeView, type CodeViewHandle, WorkerPoolContextProvider } from "@pierre/diffs/react";
 import type { GitStatus, GitStatusEntry } from "@pierre/trees";
 import { FileTree, useFileTree } from "@pierre/trees/react";
 import { Check, ChevronDown, CircleCheck, Columns2, Copy, FileText, GitBranch, LoaderCircle, MessageSquare, PanelLeftClose, PanelLeftOpen, Quote, Reply, Rows3, Send, Terminal, Trash2, X } from "lucide-react";
@@ -45,6 +46,16 @@ type GerritCommentInput = {
 };
 
 const COMMENT_HIGHLIGHT_NAME = "gerrit-comment-range";
+const WORKER_POOL_OPTIONS = {
+  poolSize: 3,
+  totalASTLRUCacheSize: 100,
+  workerFactory: () => new Worker(new URL("@pierre/diffs/worker/worker.js", import.meta.url)),
+};
+const WORKER_HIGHLIGHTER_OPTIONS = {
+  theme: DEFAULT_THEMES,
+  langs: ["cpp", "css", "go", "python", "rust", "sh", "swift", "tsx", "typescript", "zig"],
+  preferredHighlighter: "shiki-wasm" as const,
+};
 
 type ContentResponse = {
   exists: boolean;
@@ -1198,18 +1209,20 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
           <span className="summary-add">+{data.insertions}</span>
           <span className="summary-del">−{data.deletions}</span>
         </div>
-        <CodeView<CommentMetadata>
-          ref={viewerRef}
-          containerRef={codeViewContainerRef}
-          initialItems={initialItems}
-          className="pierre-code-view"
-          options={options}
-          selectedLines={selectedLines}
-          onSelectedLinesChange={setSelectedLines}
-          renderAnnotation={renderAnnotation}
-          renderHeaderPrefix={renderHeaderPrefix}
-          renderHeaderMetadata={renderHeaderMetadata}
-        />
+        <WorkerPoolContextProvider poolOptions={WORKER_POOL_OPTIONS} highlighterOptions={WORKER_HIGHLIGHTER_OPTIONS}>
+          <CodeView<CommentMetadata>
+            ref={viewerRef}
+            containerRef={codeViewContainerRef}
+            initialItems={initialItems}
+            className="pierre-code-view"
+            options={options}
+            selectedLines={selectedLines}
+            onSelectedLinesChange={setSelectedLines}
+            renderAnnotation={renderAnnotation}
+            renderHeaderPrefix={renderHeaderPrefix}
+            renderHeaderMetadata={renderHeaderMetadata}
+          />
+        </WorkerPoolContextProvider>
         {codeTextSelection && (
           <button
             type="button"

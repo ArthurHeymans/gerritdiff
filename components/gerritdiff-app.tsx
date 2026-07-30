@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   ArrowRight,
@@ -41,6 +40,10 @@ function Logo() {
   );
 }
 
+function HomeLink() {
+  return <button type="button" className="logo-link home-button" aria-label="GerritDiff home" onClick={() => window.location.assign("/")}><Logo /></button>;
+}
+
 function ThemeButton() {
   const theme = useGerritDiffTheme();
   return (
@@ -50,7 +53,7 @@ function ThemeButton() {
   );
 }
 
-function UrlForm({ initial = "", compact = false }: { initial?: string; compact?: boolean }) {
+function UrlForm({ initial = "", compact = false, submitLabel }: { initial?: string; compact?: boolean; submitLabel?: string }) {
   const router = useRouter();
   const [value, setValue] = useState(initial);
 
@@ -71,7 +74,7 @@ function UrlForm({ initial = "", compact = false }: { initial?: string; compact?
         spellCheck={false}
       />
       <button type="submit" aria-label="Open change">
-        <span>{compact ? "Open" : "View change"}</span><ArrowRight size={17} />
+        <span>{submitLabel ?? (compact ? "Open" : "View change")}</span><ArrowRight size={17} />
       </button>
     </form>
   );
@@ -144,7 +147,7 @@ function Viewer({ data }: { data: ChangeData }) {
   return (
     <main className="viewer">
       <header className="viewer-topbar">
-        <Link href="/" className="logo-link"><Logo /></Link>
+        <HomeLink />
         <UrlForm initial={data.sourceUrl} compact />
         <div className="topbar-actions">
           <a className="source-link" href={data.sourceUrl} target="_blank" rel="noreferrer">Gerrit <ExternalLink size={14} /></a>
@@ -159,6 +162,7 @@ function Viewer({ data }: { data: ChangeData }) {
 function ChangeLoader({ url, base }: { url: string; base?: string }) {
   const [data, setData] = useState<ChangeData | null>(null);
   const [error, setError] = useState("");
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -173,17 +177,30 @@ function ChangeLoader({ url, base }: { url: string; base?: string }) {
         if (reason.name !== "AbortError") setError(reason.message);
       });
     return () => controller.abort();
-  }, [base, url]);
+  }, [attempt, base, url]);
 
   if (error) return (
     <main className="state-page">
-      <nav className="nav shell"><Link href="/" className="logo-link"><Logo /></Link><ThemeButton /></nav>
-      <div className="state-card error-card"><span>!</span><h1>Couldn&apos;t load change</h1><p>{error}</p><Link href="/">Try another URL</Link></div>
+      <nav className="nav shell"><HomeLink /><ThemeButton /></nav>
+      <div className="state-card error-card">
+        <span>!</span>
+        <h1>Couldn&apos;t load this change</h1>
+        <p className="state-guidance">Check the Gerrit URL, try again, or paste a different change below.</p>
+        <UrlForm initial={url} submitLabel="Open URL" />
+        <div className="state-actions">
+          <button type="button" onClick={() => { setError(""); setAttempt((current) => current + 1); }}>Try again</button>
+          <button type="button" className="secondary" onClick={() => window.location.assign("/")}>Start over</button>
+        </div>
+        <details className="error-details">
+          <summary>Technical details</summary>
+          <p>{error}</p>
+        </details>
+      </div>
     </main>
   );
   if (!data) return (
     <main className="state-page">
-      <nav className="nav shell"><Logo /><ThemeButton /></nav>
+      <nav className="nav shell"><HomeLink /><ThemeButton /></nav>
       <div className="state-card"><LoaderCircle className="spinner" size={30} /><h1>Loading change</h1><p>Fetching metadata and patch from Gerrit…</p></div>
     </main>
   );

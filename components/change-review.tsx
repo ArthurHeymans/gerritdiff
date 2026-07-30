@@ -566,7 +566,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   const [localReviewComments, setLocalReviewComments] = useState<LocalReviewComment[]>([]);
   const [activeThreadKey, setActiveThreadKey] = useState<string | null>(null);
   const [patchsetDiscussionsOpen, setPatchsetDiscussionsOpen] = useState(false);
-  const [relationPanelOpen, setRelationPanelOpen] = useState(false);
+  const [relationPanelOpen, setRelationPanelOpen] = useState(data.relationChain.length > 1);
   const [publishOpen, setPublishOpen] = useState(false);
   const [sshUser, setSshUser] = useState("");
   const [sshHost, setSshHost] = useState(data.host);

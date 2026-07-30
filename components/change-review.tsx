@@ -592,6 +592,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   const [commentCount, setCommentCount] = useState(0);
   const [diffStyle, setDiffStyle] = useState<"split" | "unified">("split");
   const [showWhitespace, setShowWhitespace] = useState(false);
+  const [tabSize, setTabSize] = useState(2);
   const [sidebarMode, setSidebarMode] = useState<"changed" | "repository" | "discussion">("changed");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [knownPath, setKnownPath] = useState("");
@@ -922,6 +923,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     stickyHeaders: true,
     hunkSeparators: "line-info-basic",
     unsafeCSS: `
+      :host { --diffs-tab-size: ${tabSize}; }
       ::highlight(${COMMENT_HIGHLIGHT_NAME}) { background-color: rgba(231, 177, 54, .38); text-decoration: underline 1px rgba(245, 198, 83, .9); text-underline-offset: 2px; }
       :is(:host([data-show-whitespace]), [data-show-whitespace]) [data-whitespace-marker="space"] { color: transparent; background-image: radial-gradient(circle, color-mix(in srgb, var(--diffs-fg) 42%, transparent) 1px, transparent 1.2px); background-position: .5ch center; background-repeat: repeat-x; background-size: 1ch 100%; }
       :is(:host([data-show-whitespace]), [data-show-whitespace]) [data-whitespace-marker="tab"] { position: relative; color: transparent; }
@@ -931,7 +933,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     onGutterUtilityClick(range, context) {
       createDraft(range, context.item.id);
     },
-  }), [createDraft, diffStyle, renderWhitespaceMarkers, theme]);
+  }), [createDraft, diffStyle, renderWhitespaceMarkers, tabSize, theme]);
 
   const addDiscussionReply = useCallback((itemId: string, key: string, message: string, resolved: boolean) => {
     const timestamp = new Date().toISOString();
@@ -1308,6 +1310,14 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
             <Pilcrow size={14} />
             <span>Whitespace</span>
           </button>
+          <label className="tab-size-setting">
+            <span>Tab size</span>
+            <select aria-label="Tab size" value={tabSize} onChange={(event) => setTabSize(Number(event.target.value))}>
+              <option value={2}>2</option>
+              <option value={4}>4</option>
+              <option value={8}>8</option>
+            </select>
+          </label>
           <button
             type="button"
             className="diff-style-toggle"

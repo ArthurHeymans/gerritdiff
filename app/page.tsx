@@ -1,10 +1,10 @@
 import { Suspense } from "react";
-import { ClankerApp } from "@/components/clanker-app";
+import { GerritDiffApp } from "@/components/gerritdiff-app";
 
 export default function Home() {
   return (
     <Suspense>
-      <ClankerApp />
+      <GerritDiffApp />
     </Suspense>
   );
 }

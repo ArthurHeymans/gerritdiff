@@ -1,5 +1,5 @@
 {
-  "name": "gerrit-clanker",
+  "name": "gerritdiff",
   "version": "0.1.0",
   "private": true,
   "scripts": {

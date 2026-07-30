@@ -15,6 +15,12 @@
   --green-bg: rgba(50, 191, 112, .12);
   --red: #ff6b7a;
   --red-bg: rgba(235, 72, 91, .12);
+  --suggestion-del-fg: #ffc1c8;
+  --suggestion-del-bg: rgba(255, 77, 95, .16);
+  --suggestion-del-gutter: rgba(255, 77, 95, .12);
+  --suggestion-add-fg: #b7f7d1;
+  --suggestion-add-bg: rgba(52, 199, 123, .16);
+  --suggestion-add-gutter: rgba(52, 199, 123, .12);
   --blue: #62a8ff;
   --shadow: 0 24px 80px rgba(0, 0, 0, .35);
   color-scheme: dark;
@@ -35,6 +41,12 @@
   --green-bg: rgba(27, 153, 82, .1);
   --red: #d83d52;
   --red-bg: rgba(216, 61, 82, .09);
+  --suggestion-del-fg: #7f1d2d;
+  --suggestion-del-bg: #fde1e5;
+  --suggestion-del-gutter: #f8cbd1;
+  --suggestion-add-fg: #075f35;
+  --suggestion-add-bg: #d9f3e3;
+  --suggestion-add-gutter: #bfe7cf;
   --blue: #2674cf;
   --shadow: 0 24px 70px rgba(20, 20, 35, .09);
   color-scheme: light;
@@ -179,13 +191,14 @@ a { color: inherit; text-decoration: none; }
 /* Pierre CodeView + FileTree review surface */
 .review-layout { height: calc(100vh - 60px); display: grid; grid-template-columns: 260px minmax(0, 1fr); overflow: hidden; }
 .pierre-sidebar { position: relative; top: auto; height: 100%; }
-.sidebar-tabs { height: 46px; flex: none; display: grid; grid-template-columns: 1fr 1fr; padding: 7px; gap: 4px; border-bottom: 1px solid var(--border); }
+.sidebar-tabs { height: 46px; flex: none; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 7px; gap: 4px; border-bottom: 1px solid var(--border); }
 .sidebar-tabs button { border: 0; border-radius: 6px; color: var(--faint); background: transparent; cursor: pointer; font-size: 10px; font-weight: 700; }
 .sidebar-tabs button:hover { color: var(--text); background: var(--panel-2); }.sidebar-tabs button.active { color: var(--text); background: var(--panel-3); box-shadow: inset 0 0 0 1px var(--border); }.sidebar-tabs b { margin-left: 4px; color: var(--muted); }
 .repository-browser { min-height: 0; flex: 1; display: flex; flex-direction: column; position: relative; }
 .repository-browser .pierre-tree { flex: 1; }
 .repository-state { flex: none; display: flex; align-items: center; gap: 7px; padding: 9px 11px; color: var(--muted); background: var(--panel-2); border-bottom: 1px solid var(--border); font-size: 9px; line-height: 1.4; }.repository-state.error, .repository-state.unavailable { color: #d8a54f; }
 .repository-fallback { padding: 14px; color: var(--faint); text-align: center; }.repository-fallback svg { color: var(--muted); }.repository-fallback p { margin: 6px 0 0; font-size: 9px; line-height: 1.45; }
+.discussion-sidebar { min-height: 0; flex: 1; overflow: auto; padding: 7px; }.discussion-sidebar button { width: 100%; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 9px; border: 0; border-radius: 7px; color: var(--muted); background: transparent; text-align: left; cursor: pointer; }.discussion-sidebar button:hover:not(:disabled) { background: var(--panel-2); }.discussion-sidebar button:disabled { opacity: .65; cursor: default; }.discussion-sidebar strong { color: var(--text); font-size: 10px; }.discussion-sidebar p { width: 100%; margin: 0; overflow: hidden; color: var(--muted); font-size: 9px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }.discussion-path { width: 100%; overflow: hidden; color: var(--accent); font: 8px "DM Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }.discussion-meta { color: var(--faint); font-size: 8px; }.discussion-empty { min-height: 0; flex: 1; display: grid; place-content: center; justify-items: center; gap: 5px; padding: 20px; color: var(--faint); text-align: center; }.discussion-empty strong { color: var(--muted); font-size: 11px; }.discussion-empty span { font-size: 9px; }
 .known-path-form { flex: none; display: flex; gap: 5px; padding: 8px; border-top: 1px solid var(--border); }.known-path-form input { min-width: 0; flex: 1; height: 30px; padding: 0 8px; border: 1px solid var(--border); border-radius: 6px; outline: none; color: var(--text); background: var(--bg); font: 9px "DM Mono", monospace; }.known-path-form input:focus { border-color: var(--accent); }.known-path-form button { border: 0; border-radius: 6px; padding: 0 9px; color: #17131f; background: var(--accent-strong); cursor: pointer; font-size: 9px; font-weight: 750; }.known-path-form button:disabled { opacity: .4; cursor: default; }
 .pierre-tree { flex: 1; min-height: 0; width: 100%; color: var(--muted); background: var(--panel); --trees-bg-override: var(--panel); --trees-fg-override: var(--muted); --trees-selected-bg-override: var(--panel-3); --trees-selected-fg-override: var(--text); --trees-hover-bg-override: var(--panel-2); --trees-focus-ring-color-override: var(--accent); --trees-input-bg-override: var(--bg); --trees-input-border-override: var(--border); --trees-input-fg-override: var(--text); }
 .pierre-main { height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
@@ -212,6 +225,10 @@ a { color: inherit; text-decoration: none; }
 .comment-actions > span { margin-right: auto; color: var(--faint); font-size: 9px; }
 .comment-actions button, .saved-comment > button { display: inline-flex; align-items: center; gap: 5px; border: 0; border-radius: 6px; padding: 6px 9px; color: #16131f; background: var(--accent-strong); cursor: pointer; font-size: 10px; font-weight: 700; }
 .comment-actions button:disabled { opacity: .4; cursor: default; }.comment-actions .comment-cancel { color: var(--muted); background: transparent; }.comment-actions .comment-cancel:hover { color: var(--text); background: var(--panel-3); }
+.existing-discussion { flex-direction: column; gap: 0; }.existing-thread-head { display: flex; align-items: center; gap: 8px; padding-bottom: 9px; border-bottom: 1px solid var(--border); }.existing-thread-head strong { font-size: 10px; }.existing-thread-head span { margin-left: auto; padding: 3px 6px; border-radius: 99px; font-size: 8px; font-weight: 750; }.existing-thread-head .unresolved { color: #e8b75c; background: rgba(221,159,57,.1); }.existing-thread-head .resolved { color: var(--green); background: var(--green-bg); }.existing-comment { display: flex; gap: 9px; padding-top: 10px; }.existing-comment + .existing-comment { margin-top: 10px; border-top: 1px solid var(--border); }.existing-comment .comment-avatar { background-position: center; background-size: cover; }.existing-comment > div { min-width: 0; flex: 1; }.existing-comment-meta { display: flex; align-items: baseline; gap: 7px; }.existing-comment-meta strong { font-size: 10px; }.existing-comment-meta span { color: var(--faint); font-size: 8px; }.comment-markup p { margin: 5px 0 0; color: var(--muted); line-height: 1.5; white-space: pre-wrap; }.comment-markup blockquote { margin: 7px 0 0; padding: 7px 9px; border-left: 3px solid var(--accent); color: var(--faint); background: var(--bg); white-space: pre-wrap; }
+.gerrit-suggestion { margin-top: 7px; overflow: hidden; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); }.gerrit-suggestion > div:first-child { display: flex; align-items: center; padding: 6px 8px; border-bottom: 1px solid var(--border); color: var(--text); background: var(--panel-3); font-size: 9px; }.gerrit-suggestion button { margin-left: auto; border: 0; color: var(--green); background: transparent; cursor: pointer; font-size: 8px; }.suggestion-diff { overflow: auto; padding-block: 4px; }.suggestion-diff > div { min-width: max-content; display: grid; grid-template-columns: 25px 1fr; font: 10px/1.55 "DM Mono", monospace; white-space: pre; }.suggestion-diff span { display: grid; place-items: center; user-select: none; opacity: .75; }.suggestion-diff code { padding: 1px 9px; }.suggestion-deletion { color: var(--suggestion-del-fg); background: var(--suggestion-del-bg); }.suggestion-deletion span { background: var(--suggestion-del-gutter); }.suggestion-addition { color: var(--suggestion-add-fg); background: var(--suggestion-add-bg); }.suggestion-addition span { background: var(--suggestion-add-gutter); }
+.existing-comment.local-reply { margin-inline: 10px; padding: 9px; border: 1px dashed var(--border); border-radius: 7px; background: var(--bg); }.discussion-actions { display: flex; gap: 4px; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); }.discussion-actions button { display: inline-flex; align-items: center; gap: 4px; padding: 5px 7px; border: 0; border-radius: 5px; color: var(--faint); background: transparent; cursor: pointer; font-size: 9px; }.discussion-actions button:hover { color: var(--text); background: var(--panel-3); }
+.discussion-reply { margin-top: 8px; }.discussion-reply textarea { width: 100%; resize: vertical; padding: 8px; border: 1px solid var(--border); border-radius: 7px; outline: none; color: var(--text); background: var(--bg); font: 10px/1.5 Manrope, sans-serif; }.discussion-reply textarea:focus { border-color: var(--accent); }.discussion-reply > div { display: flex; align-items: center; gap: 5px; margin-top: 6px; }.discussion-reply span { margin-right: auto; color: var(--faint); font-size: 8px; }.discussion-reply button { padding: 5px 7px; border: 0; border-radius: 5px; color: var(--muted); background: var(--panel-3); cursor: pointer; font-size: 9px; }.discussion-reply button[type="submit"] { color: #17131f; background: var(--accent-strong); font-weight: 700; }.discussion-reply button:disabled { opacity: .4; cursor: default; }
 .saved-comment { cursor: pointer; }.saved-comment-body { min-width: 0; flex: 1; }.saved-comment-body > div { display: flex; align-items: baseline; gap: 7px; }.saved-comment-body strong { font-size: 11px; }.saved-comment-body span { color: var(--faint); font-size: 9px; }.saved-comment-body p { margin: 5px 0 0; color: var(--muted); line-height: 1.55; white-space: pre-wrap; }.saved-comment > button { align-self: start; padding: 6px; color: var(--faint); background: transparent; }.saved-comment > button:hover { color: var(--red); background: var(--red-bg); }
 
 @media (max-width: 800px) {

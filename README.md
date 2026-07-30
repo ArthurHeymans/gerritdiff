@@ -1,4 +1,4 @@
-# Clanker
+# GerritDiff
 
 A fast, focused diff viewer for public Gerrit changes, inspired by [DiffsHub](https://diffshub.com/).
 
@@ -11,6 +11,8 @@ A fast, focused diff viewer for public Gerrit changes, inspired by [DiffsHub](ht
 - Repository navigation powered by `@pierre/trees` FileTree
 - Lazy Gitiles tree browsing for files outside the change
 - Full-file expansion using current and parent patchset contents
+- Unified and side-by-side diff layouts
+- Existing Gerrit discussions, including current and ported comments
 - Line and range comments using Pierre annotations and gutter utilities
 - Dark and light Pierre themes
 - Basic SSRF protection for the public proxy
@@ -31,7 +33,7 @@ npm run build
 npm run start
 ```
 
-Clanker currently supports anonymously readable changes. Private Gerrit
+GerritDiff currently supports anonymously readable changes. Private Gerrit
 authentication is intentionally not included in the first version. Full repository
 tree browsing requires the Gerrit project to advertise a Gitiles web link; known
 file paths can still be opened directly through Gerrit's commit content API.

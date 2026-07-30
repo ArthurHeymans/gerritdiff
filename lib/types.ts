@@ -1,3 +1,19 @@
+export type GerritComment = {
+  id: string;
+  path: string;
+  patchSet: number;
+  line?: number;
+  side: "PARENT" | "REVISION";
+  range?: { startLine: number; startCharacter: number; endLine: number; endCharacter: number };
+  contextLines?: { lineNumber: number; text: string }[];
+  author: { name: string; email?: string; avatarUrl?: string };
+  message: string;
+  updated: string;
+  unresolved: boolean;
+  inReplyTo?: string;
+  ported?: boolean;
+};
+
 export type ChangeData = {
   host: string;
   sourceUrl: string;
@@ -13,4 +29,5 @@ export type ChangeData = {
   insertions: number;
   deletions: number;
   patch: string;
+  comments: GerritComment[];
 };

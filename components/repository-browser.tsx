@@ -6,7 +6,7 @@ import { FileTree, useFileTree } from "@pierre/trees/react";
 import { FolderGit2, LoaderCircle, TriangleAlert } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-const PENDING_NAME = ".__clanker_pending__";
+const PENDING_NAME = ".__gerritdiff_pending__";
 
 function pendingPath(directory: string) {
   return directory ? `${directory}/${PENDING_NAME}` : PENDING_NAME;

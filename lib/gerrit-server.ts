@@ -85,7 +85,7 @@ export async function publicFetch(url: string, accept = "application/json", allo
   let response: Response;
   try {
     response = await fetch(url, {
-      headers: { Accept: accept, "User-Agent": "Clanker/0.1" },
+      headers: { Accept: accept, "User-Agent": "GerritDiff/0.1" },
       redirect: "error",
       signal: AbortSignal.timeout(20_000),
     });

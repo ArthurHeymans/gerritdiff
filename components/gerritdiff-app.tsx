@@ -17,7 +17,7 @@ import {
   Zap,
 } from "lucide-react";
 import { ChangeReview } from "@/components/change-review";
-import { setClankerTheme, useClankerTheme } from "@/lib/theme";
+import { setGerritDiffTheme, useGerritDiffTheme } from "@/lib/theme";
 import type { ChangeData } from "@/lib/types";
 
 const EXAMPLES = [
@@ -35,16 +35,16 @@ function Logo() {
   return (
     <div className="brand">
       <span className="logo-mark"><span /></span>
-      <span>clanker</span>
+      <span>gerritdiff</span>
       <span className="beta">beta</span>
     </div>
   );
 }
 
 function ThemeButton() {
-  const theme = useClankerTheme();
+  const theme = useGerritDiffTheme();
   return (
-    <button className="icon-button" onClick={() => setClankerTheme(theme === "dark" ? "light" : "dark")} aria-label="Toggle color theme">
+    <button className="icon-button" onClick={() => setGerritDiffTheme(theme === "dark" ? "light" : "dark")}  aria-label="Toggle color theme">
       {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
     </button>
   );
@@ -116,14 +116,14 @@ function Landing() {
 
       <footer className="footer shell">
         <span>Built for people who review code.</span>
-        <span>Clanker is not affiliated with Gerrit.</span>
+        <span>GerritDiff is not affiliated with Gerrit.</span>
       </footer>
     </main>
   );
 }
 
 function Viewer({ data }: { data: ChangeData }) {
-  const theme = useClankerTheme();
+  const theme = useGerritDiffTheme();
   return (
     <main className="viewer">
       <header className="viewer-topbar">
@@ -173,7 +173,7 @@ function ChangeLoader({ url }: { url: string }) {
   return <Viewer data={data} />;
 }
 
-export function ClankerApp() {
+export function GerritDiffApp() {
   const searchParams = useSearchParams();
   const url = searchParams.get("url");
   return url ? <ChangeLoader key={url} url={url} /> : <Landing />;

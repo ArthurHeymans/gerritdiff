@@ -2,9 +2,9 @@
 
 import { useSyncExternalStore } from "react";
 
-export type ClankerTheme = "dark" | "light";
+export type GerritDiffTheme = "dark" | "light";
 
-const THEME_EVENT = "clanker-theme-change";
+const THEME_EVENT = "gerritdiff-theme-change";
 
 function subscribe(listener: () => void) {
   window.addEventListener(THEME_EVENT, listener);
@@ -15,16 +15,16 @@ function subscribe(listener: () => void) {
   };
 }
 
-function getSnapshot(): ClankerTheme {
+function getSnapshot(): GerritDiffTheme {
   return document.documentElement.dataset.theme === "light" ? "light" : "dark";
 }
 
-export function useClankerTheme(): ClankerTheme {
+export function useGerritDiffTheme(): GerritDiffTheme {
   return useSyncExternalStore(subscribe, getSnapshot, () => "dark");
 }
 
-export function setClankerTheme(theme: ClankerTheme) {
+export function setGerritDiffTheme(theme: GerritDiffTheme) {
   document.documentElement.dataset.theme = theme;
-  localStorage.setItem("clanker-theme", theme);
+  localStorage.setItem("gerritdiff-theme", theme);
   window.dispatchEvent(new Event(THEME_EVENT));
 }

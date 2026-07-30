@@ -16,15 +16,18 @@ import {
 import { CodeView, type CodeViewHandle } from "@pierre/diffs/react";
 import type { GitStatus, GitStatusEntry } from "@pierre/trees";
 import { FileTree, useFileTree } from "@pierre/trees/react";
-import { ChevronDown, Columns2, FileText, GitBranch, LoaderCircle, MessageSquare, Rows3, Send, Trash2, X } from "lucide-react";
+import { Check, ChevronDown, CircleCheck, Columns2, FileText, GitBranch, LoaderCircle, MessageSquare, Quote, Reply, Rows3, Send, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RepositoryBrowser } from "@/components/repository-browser";
-import type { ChangeData } from "@/lib/types";
-import type { ClankerTheme } from "@/lib/theme";
+import type { ChangeData, GerritComment } from "@/lib/types";
+import type { GerritDiffTheme } from "@/lib/theme";
+
+type DiscussionThread = { id: string; path: string; comments: GerritComment[] };
 
 type CommentMetadata =
   | { kind: "draft"; key: string; message: string; range: SelectedLineRange }
-  | { kind: "saved"; key: string; author: string; message: string; range: SelectedLineRange };
+  | { kind: "saved"; key: string; author: string; message: string; range: SelectedLineRange }
+  | { kind: "existing"; key: string; range: SelectedLineRange; thread: DiscussionThread };
 
 type ActiveDraft = { itemId: string; key: string };
 
@@ -59,6 +62,35 @@ function gitStatusFor(file: FileDiffMetadata): GitStatus {
   return "modified";
 }
 
+function buildDiscussionThreads(comments: GerritComment[]): DiscussionThread[] {
+  const byId = new Map(comments.map((comment) => [comment.id, comment]));
+  const grouped = new Map<string, GerritComment[]>();
+  for (const comment of comments) {
+    let root = comment;
+    const visited = new Set([comment.id]);
+    while (root.inReplyTo) {
+      const parent = byId.get(root.inReplyTo);
+      if (!parent || visited.has(parent.id)) break;
+      visited.add(parent.id);
+      root = parent;
+    }
+    grouped.set(root.id, [...(grouped.get(root.id) ?? []), comment]);
+  }
+  return [...grouped.entries()].map(([id, threadComments]) => {
+    const sorted = threadComments.toSorted((a, b) => a.updated.localeCompare(b.updated));
+    return { id, path: sorted[0]?.path ?? "/PATCHSET_LEVEL", comments: sorted };
+  }).toSorted((a, b) => (b.comments.at(-1)?.updated ?? "").localeCompare(a.comments.at(-1)?.updated ?? ""));
+}
+
+function threadAnchor(thread: DiscussionThread, revisionNumber: number) {
+  return thread.comments.find((comment) => (comment.patchSet === revisionNumber || comment.ported) && (comment.line || comment.range));
+}
+
+function commentRange(comment: GerritComment): SelectedLineRange {
+  const side = comment.side === "PARENT" ? "deletions" : "additions";
+  return { start: comment.range?.startLine ?? comment.line ?? 0, end: comment.range?.endLine ?? comment.line ?? 0, side, endSide: side };
+}
+
 function DraftComment({
   annotation,
   itemId,
@@ -70,7 +102,7 @@ function DraftComment({
   onCancel(itemId: string, key: string): void;
   onSave(itemId: string, key: string, message: string): void;
 }) {
-  const [message, setMessage] = useState(annotation.metadata?.message ?? "");
+  const [message, setMessage] = useState(annotation.metadata?.kind === "draft" ? annotation.metadata.message : "");
   const key = annotation.metadata?.key ?? "";
   const trimmed = message.trim();
 
@@ -130,6 +162,121 @@ function SavedComment({
   );
 }
 
+function commentSummary(message: string) {
+  const suggestion = message.match(/```suggestion\s*\n([\s\S]*?)```/);
+  return suggestion ? `Suggested change: ${suggestion[1].trim().replace(/\s+/g, " ")}` : message;
+}
+
+function suggestionOriginal(comment: GerritComment) {
+  const lines = comment.contextLines?.toSorted((a, b) => a.lineNumber - b.lineNumber) ?? [];
+  const range = comment.range;
+  if (!range) return lines.find((line) => line.lineNumber === comment.line)?.text ?? "";
+  const selected = lines.filter((line) => line.lineNumber >= range.startLine && line.lineNumber <= range.endLine);
+  if (!selected.length) return "";
+  if (range.startLine === range.endLine) return (selected[0]?.text ?? "").slice(range.startCharacter, range.endCharacter);
+  return selected.map((line, index) => {
+    if (index === 0) return line.text.slice(range.startCharacter);
+    if (index === selected.length - 1) return line.text.slice(0, range.endCharacter);
+    return line.text;
+  }).join("\n");
+}
+
+function CommentText({ comment }: { comment: GerritComment }) {
+  const { message } = comment;
+  const suggestion = message.match(/```suggestion\s*\n([\s\S]*?)```/);
+  const renderText = (text: string, key: string) => {
+    const trimmed = text.trim();
+    if (!trimmed) return null;
+    return (
+      <div className="comment-markup" key={key}>
+        {trimmed.split(/\n{2,}/).map((block, index) => block.split("\n").every((line) => line.trimStart().startsWith(">"))
+          ? <blockquote key={index}>{block.split("\n").map((line) => line.replace(/^\s*>\s?/, "")).join("\n")}</blockquote>
+          : <p key={index}>{block}</p>)}
+      </div>
+    );
+  };
+  if (!suggestion || suggestion.index === undefined) return renderText(message, "message");
+  const code = suggestion[1].replace(/\n$/, "");
+  const original = suggestionOriginal(comment);
+  return (
+    <>
+      {renderText(message.slice(0, suggestion.index), "before")}
+      <div className="gerrit-suggestion">
+        <div><strong>Suggested edit</strong><button onClick={() => void navigator.clipboard.writeText(code)}>Copy</button></div>
+        <div className="suggestion-diff">
+          {original.split("\n").map((line, index) => <div className="suggestion-deletion" key={`old-${index}`}><span>−</span><code>{line}</code></div>)}
+          {code.split("\n").map((line, index) => <div className="suggestion-addition" key={`new-${index}`}><span>+</span><code>{line}</code></div>)}
+        </div>
+      </div>
+      {renderText(message.slice(suggestion.index + suggestion[0].length), "after")}
+    </>
+  );
+}
+
+function ExistingDiscussion({ annotation, itemId, onReply }: { annotation: DiffLineAnnotation<CommentMetadata>; itemId: string; onReply(itemId: string, key: string, message: string, resolve: boolean): void }) {
+  const metadata = annotation.metadata;
+  const [draft, setDraft] = useState<string | null>(null);
+  if (!metadata || metadata.kind !== "existing") return null;
+  const latest = metadata.thread.comments.at(-1);
+  const unresolved = latest?.unresolved ?? false;
+  const submit = (message: string, resolve = false) => {
+    const trimmed = message.trim();
+    if (!trimmed) return;
+    onReply(itemId, metadata.key, trimmed, resolve);
+    setDraft(null);
+  };
+  return (
+    <div className="comment-card existing-discussion">
+      <div className="existing-thread-head">
+        <strong>{metadata.thread.comments.length === 1 ? "Review comment" : `${metadata.thread.comments.length} comment discussion`}</strong>
+        <span className={unresolved ? "unresolved" : "resolved"}>{unresolved ? "Unresolved" : "Resolved"}</span>
+      </div>
+      {metadata.thread.comments.map((comment) => (
+        <div className={`existing-comment${comment.id.startsWith("local-reply-") ? " local-reply" : ""}`} key={comment.id}>
+          <span className="comment-avatar" style={comment.author.avatarUrl ? { backgroundImage: `url(${comment.author.avatarUrl})` } : undefined}>
+            {comment.author.avatarUrl ? null : comment.author.name.slice(0, 2).toUpperCase()}
+          </span>
+          <div>
+            <div className="existing-comment-meta"><strong>{comment.author.name}</strong><span>{comment.id.startsWith("local-reply-") ? "Local reply" : `Patchset ${comment.patchSet}`}</span></div>
+            <CommentText comment={comment} />
+          </div>
+        </div>
+      ))}
+      <div className="discussion-actions">
+        <button onClick={() => setDraft("")}><Reply size={12} /> Reply</button>
+        <button onClick={() => setDraft(`${(latest?.message ?? "").split("\n").map((line) => `> ${line}`).join("\n")}\n\n`)}><Quote size={12} /> Quote</button>
+        <button onClick={() => submit("Ack", true)}><Check size={12} /> Ack</button>
+        <button onClick={() => submit("Done", true)}><CircleCheck size={12} /> Done</button>
+      </div>
+      {draft !== null && (
+        <form className="discussion-reply" onSubmit={(event) => { event.preventDefault(); submit(draft); }}>
+          <textarea autoFocus rows={3} value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Write a reply…" />
+          <div><span>Saved locally; Gerrit sign-in is required to publish.</span><button type="button" onClick={() => setDraft(null)}>Cancel</button><button type="submit" disabled={!draft.trim()}>Add reply</button></div>
+        </form>
+      )}
+    </div>
+  );
+}
+
+function DiscussionSidebar({ threads, onSelect }: { threads: DiscussionThread[]; onSelect(thread: DiscussionThread): void }) {
+  if (!threads.length) return <div className="discussion-empty"><MessageSquare size={20} /><strong>No discussion yet</strong><span>Published Gerrit comments will appear here.</span></div>;
+  return (
+    <div className="discussion-sidebar">
+      {threads.map((thread) => {
+        const latest = thread.comments.at(-1);
+        return (
+          <button key={thread.id} onClick={() => onSelect(thread)}>
+            <span className="discussion-path">{thread.path === "/PATCHSET_LEVEL" ? "Patchset" : thread.path}</span>
+            <strong>{thread.comments[0]?.author.name}</strong>
+            <p>{commentSummary(thread.comments[0]?.message ?? "")}</p>
+            <span className="discussion-meta">{thread.comments.length} comment{thread.comments.length === 1 ? "" : "s"} · Patchset {thread.comments[0]?.patchSet}{latest?.unresolved ? " · Unresolved" : ""}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function CollapseButton({ collapsed, disabled, onToggle }: { collapsed?: boolean; disabled: boolean; onToggle(): void }) {
   return (
     <button
@@ -179,14 +326,14 @@ function ReviewFileTree({
   return <FileTree model={model} className="pierre-tree" />;
 }
 
-export function ChangeReview({ data, theme }: { data: ChangeData; theme: ClankerTheme }) {
+export function ChangeReview({ data, theme }: { data: ChangeData; theme: GerritDiffTheme }) {
   const viewerRef = useRef<CodeViewHandle<CommentMetadata> | null>(null);
   const activeDraftRef = useRef<ActiveDraft | null>(null);
   const nextCommentRef = useRef(1);
   const [selectedLines, setSelectedLines] = useState<CodeViewLineSelection | null>(null);
   const [commentCount, setCommentCount] = useState(0);
   const [diffStyle, setDiffStyle] = useState<"split" | "unified">("split");
-  const [sidebarMode, setSidebarMode] = useState<"changed" | "repository">("changed");
+  const [sidebarMode, setSidebarMode] = useState<"changed" | "repository" | "discussion">("changed");
   const [knownPath, setKnownPath] = useState("");
   const [repositoryError, setRepositoryError] = useState("");
   const [loadingItems, setLoadingItems] = useState<ReadonlySet<string>>(() => new Set());
@@ -195,9 +342,23 @@ export function ChangeReview({ data, theme }: { data: ChangeData; theme: Clanker
     () => parsePatchFiles(data.patch, `${data.host}-${data.changeNumber}-${data.revisionNumber}`, true).flatMap((parsed) => parsed.files),
     [data.changeNumber, data.host, data.patch, data.revisionNumber],
   );
+  const [discussionThreads, setDiscussionThreads] = useState(() => buildDiscussionThreads(data.comments));
   const initialItems = useMemo<CodeViewItem<CommentMetadata>[]>(
-    () => files.map((fileDiff, index) => ({ id: `file-${index}`, type: "diff", fileDiff })),
-    [files],
+    () => files.map((fileDiff, index) => {
+      const annotations: DiffLineAnnotation<CommentMetadata>[] = [];
+      for (const thread of discussionThreads) {
+        const anchor = threadAnchor(thread, data.revisionNumber);
+        if (!anchor || anchor.path !== fileDiff.name) continue;
+        const range = commentRange(anchor);
+        annotations.push({
+          side: range.side ?? "additions",
+          lineNumber: range.end,
+          metadata: { kind: "existing", key: `gerrit:${thread.id}`, range, thread },
+        });
+      }
+      return { id: `file-${index}`, type: "diff", fileDiff, annotations };
+    }),
+    [data.revisionNumber, discussionThreads, files],
   );
   const pathToChangedId = useMemo(
     () => new Map(files.map((file, index) => [file.name, `file-${index}`])),
@@ -297,12 +458,48 @@ export function ChangeReview({ data, theme }: { data: ChangeData; theme: Clanker
     },
   }), [createDraft, diffStyle, theme]);
 
+  const addDiscussionReply = useCallback((itemId: string, key: string, message: string, resolve: boolean) => {
+    const timestamp = new Date().toISOString();
+    let updatedThread: DiscussionThread | undefined;
+    updateDiffItem(itemId, (item) => {
+      item.annotations = item.annotations?.map((annotation) => {
+        const metadata = annotation.metadata;
+        if (metadata?.kind !== "existing" || metadata.key !== key) return annotation;
+        const latest = metadata.thread.comments.at(-1);
+        const anchor = threadAnchor(metadata.thread, data.revisionNumber) ?? metadata.thread.comments[0];
+        if (!latest || !anchor) return annotation;
+        const reply: GerritComment = {
+          id: `local-reply-${nextCommentRef.current++}`,
+          path: anchor.path,
+          patchSet: data.revisionNumber,
+          line: anchor.line,
+          side: anchor.side,
+          range: anchor.range,
+          author: { name: "You" },
+          message,
+          updated: timestamp,
+          unresolved: resolve ? false : latest.unresolved,
+          inReplyTo: latest.id,
+        };
+        updatedThread = { ...metadata.thread, comments: [...metadata.thread.comments, reply] };
+        return { ...annotation, metadata: { ...metadata, thread: updatedThread } };
+      });
+      return Boolean(updatedThread);
+    });
+    if (updatedThread) {
+      const nextThread = updatedThread;
+      setDiscussionThreads((threads) => threads.map((thread) => thread.id === nextThread.id ? nextThread : thread));
+      setCommentCount((count) => count + 1);
+    }
+  }, [data.revisionNumber, updateDiffItem]);
+
   const renderAnnotation = useCallback((annotation: DiffLineAnnotation<CommentMetadata> | LineAnnotation<CommentMetadata>, item: CodeViewItem<CommentMetadata>) => {
     if (!("side" in annotation) || item.type !== "diff" || !annotation.metadata) return null;
+    if (annotation.metadata.kind === "existing") return <ExistingDiscussion annotation={annotation} itemId={item.id} onReply={addDiscussionReply} />;
     return annotation.metadata.kind === "draft"
       ? <DraftComment annotation={annotation} itemId={item.id} onCancel={removeComment} onSave={saveComment} />
       : <SavedComment annotation={annotation} itemId={item.id} onDelete={removeComment} onSelect={toggleCommentSelection} />;
-  }, [removeComment, saveComment, toggleCommentSelection]);
+  }, [addDiscussionReply, removeComment, saveComment, toggleCommentSelection]);
 
   const renderHeaderPrefix = useCallback((item: CodeViewItem<CommentMetadata>) => {
     if (item.type !== "diff") return null;
@@ -346,6 +543,20 @@ export function ChangeReview({ data, theme }: { data: ChangeData; theme: Clanker
       });
     }
   }, [data.revision, data.sourceUrl, loadingItems]);
+
+  const selectDiscussion = useCallback(async (thread: DiscussionThread) => {
+    const anchor = threadAnchor(thread, data.revisionNumber);
+    const itemId = pathToChangedId.get(anchor?.path ?? thread.path);
+    if (!itemId) return;
+    if (!anchor) {
+      scrollToItem(itemId);
+      return;
+    }
+    await loadFullDiff(itemId);
+    const range = commentRange(anchor);
+    setSelectedLines({ id: itemId, range });
+    viewerRef.current?.scrollTo({ type: "range", id: itemId, range, align: "center", behavior: "smooth" });
+  }, [data.revisionNumber, loadFullDiff, pathToChangedId, scrollToItem]);
 
   const openRepositoryFile = useCallback(async (path: string) => {
     const changedId = pathToChangedId.get(path);
@@ -399,10 +610,11 @@ export function ChangeReview({ data, theme }: { data: ChangeData; theme: Clanker
         <div className="sidebar-tabs">
           <button className={sidebarMode === "changed" ? "active" : ""} onClick={() => setSidebarMode("changed")}>Changed <b>{files.length}</b></button>
           <button className={sidebarMode === "repository" ? "active" : ""} onClick={() => setSidebarMode("repository")}>Repository</button>
+          <button className={sidebarMode === "discussion" ? "active" : ""} onClick={() => setSidebarMode("discussion")}>Discussion <b>{discussionThreads.length}</b></button>
         </div>
-        {sidebarMode === "changed"
-          ? <ReviewFileTree files={files} onSelect={scrollToItem} />
-          : <RepositoryBrowser changedFiles={files} sourceUrl={data.sourceUrl} onOpenFile={openRepositoryFile} />}
+        {sidebarMode === "changed" && <ReviewFileTree files={files} onSelect={scrollToItem} />}
+        {sidebarMode === "repository" && <RepositoryBrowser changedFiles={files} sourceUrl={data.sourceUrl} onOpenFile={openRepositoryFile} />}
+        {sidebarMode === "discussion" && <DiscussionSidebar threads={discussionThreads} onSelect={(thread) => void selectDiscussion(thread)} />}
         {sidebarMode === "repository" && (
           <form className="known-path-form" onSubmit={(event) => { event.preventDefault(); const path = knownPath.trim().replace(/^\/+/, ""); if (path) void openRepositoryFile(path); }}>
             <input value={knownPath} onChange={(event) => setKnownPath(event.target.value)} placeholder="Open a known path…" />

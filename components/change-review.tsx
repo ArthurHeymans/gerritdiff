@@ -16,7 +16,7 @@ import {
 import { CodeView, type CodeViewHandle } from "@pierre/diffs/react";
 import type { GitStatus, GitStatusEntry } from "@pierre/trees";
 import { FileTree, useFileTree } from "@pierre/trees/react";
-import { Check, ChevronDown, CircleCheck, Columns2, FileText, GitBranch, LoaderCircle, MessageSquare, Quote, Reply, Rows3, Send, Trash2, X } from "lucide-react";
+import { Check, ChevronDown, CircleCheck, Columns2, FileText, GitBranch, LoaderCircle, MessageSquare, PanelLeftClose, PanelLeftOpen, Quote, Reply, Rows3, Send, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RepositoryBrowser } from "@/components/repository-browser";
 import type { ChangeData, GerritComment } from "@/lib/types";
@@ -377,6 +377,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   const [commentCount, setCommentCount] = useState(0);
   const [diffStyle, setDiffStyle] = useState<"split" | "unified">("split");
   const [sidebarMode, setSidebarMode] = useState<"changed" | "repository" | "discussion">("changed");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [knownPath, setKnownPath] = useState("");
   const [repositoryError, setRepositoryError] = useState("");
   const [loadingItems, setLoadingItems] = useState<ReadonlySet<string>>(() => new Set());
@@ -701,8 +702,11 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   } : undefined;
 
   return (
-    <div className={`review-layout${activeAnnotation && activeItemId ? " with-discussion-panel" : ""}`}>
-      <aside className="sidebar pierre-sidebar">
+    <div className={`review-layout${sidebarCollapsed ? " sidebar-collapsed" : ""}${activeAnnotation && activeItemId ? " with-discussion-panel" : ""}`}>
+      <aside className={`sidebar pierre-sidebar${sidebarCollapsed ? " is-collapsed" : ""}`}>
+        <button type="button" className="sidebar-collapse-toggle" onClick={() => setSidebarCollapsed((current) => !current)} aria-label={sidebarCollapsed ? "Expand file browser" : "Collapse file browser"} title={sidebarCollapsed ? "Expand file browser" : "Collapse file browser"}>
+          {sidebarCollapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
+        </button>
         <div className="sidebar-tabs">
           <button className={sidebarMode === "changed" ? "active" : ""} onClick={() => setSidebarMode("changed")}>Changed <b>{files.length}</b></button>
           <button className={sidebarMode === "repository" ? "active" : ""} onClick={() => setSidebarMode("repository")}>Repository</button>

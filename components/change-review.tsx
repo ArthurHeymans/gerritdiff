@@ -990,6 +990,10 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   const toggleActiveDiscussion = useCallback((key: string) => {
     setActiveThreadKey((current) => {
       const next = current === key ? null : key;
+      if (next) {
+        setRelationPanelOpen(false);
+        setPatchsetDiscussionsOpen(false);
+      }
       saveProjectUiSettings(data.host, data.project, { rightPanelOpen: Boolean(next) });
       return next;
     });

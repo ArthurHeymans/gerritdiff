@@ -162,7 +162,12 @@ export async function GET(request: NextRequest) {
     const commentsById = new Map(allComments.map((comment) => [comment.id, comment]));
     for (const comment of portedComments) {
       const original = commentsById.get(comment.id);
-      commentsById.set(comment.id, { ...comment, contextLines: comment.contextLines ?? original?.contextLines });
+      commentsById.set(comment.id, {
+        ...original,
+        ...comment,
+        contextLines: comment.contextLines ?? original?.contextLines,
+        unresolved: original?.unresolved ?? comment.unresolved,
+      });
     }
 
     const avatar = detail.owner.avatars?.toSorted((a, b) => b.height - a.height)[0]?.url;

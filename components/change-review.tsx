@@ -343,7 +343,7 @@ function CommentText({ comment }: { comment: GerritComment }) {
   );
 }
 
-function ExistingDiscussion({ annotation, itemId, expanded, pendingReply, onToggle, onSaveDraft, onDeleteDraft }: { annotation: DiffLineAnnotation<CommentMetadata>; itemId: string; expanded: boolean; pendingReply?: PendingReply; onToggle(key: string): void; onSaveDraft(reply: PendingReply): void; onDeleteDraft(key: string): void }) {
+function ExistingDiscussion({ annotation, itemId, expanded, pendingReply, onToggle, onSaveDraft, onDeleteDraft }: { annotation: DiffLineAnnotation<CommentMetadata> | LineAnnotation<CommentMetadata>; itemId: string; expanded: boolean; pendingReply?: PendingReply; onToggle(key: string): void; onSaveDraft(reply: PendingReply): void; onDeleteDraft(key: string): void }) {
   const metadata = annotation.metadata;
   const [draft, setDraft] = useState<{ message: string; resolved: boolean } | null>(null);
   if (!metadata || metadata.kind !== "existing") return null;
@@ -552,6 +552,15 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
         id: "commit-message",
         type: "file" as const,
         file: { name: "Commit message", contents: commitMessageContent, cacheKey: `${data.revision}:commit-message` },
+        annotations: discussionThreads.flatMap((thread): LineAnnotation<CommentMetadata>[] => {
+          const anchor = threadAnchor(thread, data.revisionNumber);
+          if (!anchor || anchor.path !== "/COMMIT_MSG") return [];
+          const range = commentRange(anchor);
+          return [{
+            lineNumber: range.end,
+            metadata: { kind: "existing", key: `gerrit:${thread.id}`, range, textRange: commentTextRange(anchor), thread },
+          }];
+        }),
       }] : []),
       ...files.map((fileDiff, index) => {
         const annotations: DiffLineAnnotation<CommentMetadata>[] = [];
@@ -693,14 +702,6 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     };
   }, [refreshCommentHighlights]);
 
-  const updateDiffItem = useCallback((itemId: string, update: (item: CodeViewDiffItem<CommentMetadata>) => boolean) => {
-    const viewer = viewerRef.current;
-    const item = viewer?.getItem(itemId);
-    if (!viewer || !item || !isDiffItem(item) || !update(item)) return undefined;
-    item.version = nextVersion(item);
-    return viewer.updateItem(item) ? item : undefined;
-  }, []);
-
   const updateCommentItem = useCallback((itemId: string, update: (item: CodeViewItem<CommentMetadata>) => boolean) => {
     const viewer = viewerRef.current;
     const item = viewer?.getItem(itemId);
@@ -797,8 +798,8 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   }, [removeComment, updateCommentItem]);
 
   const toggleCollapsed = useCallback((itemId: string) => {
-    updateDiffItem(itemId, (item) => { item.collapsed = !item.collapsed; return true; });
-  }, [updateDiffItem]);
+    updateCommentItem(itemId, (item) => { item.collapsed = !item.collapsed; return true; });
+  }, [updateCommentItem]);
 
   const toggleCommentSelection = useCallback((selection: CodeViewLineSelection | null) => {
     if (!selection) {
@@ -830,7 +831,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   const addDiscussionReply = useCallback((itemId: string, key: string, message: string, resolved: boolean) => {
     const timestamp = new Date().toISOString();
     let updatedThread: DiscussionThread | undefined;
-    updateDiffItem(itemId, (item) => {
+    updateCommentItem(itemId, (item) => {
       item.annotations = item.annotations?.map((annotation) => {
         const metadata = annotation.metadata;
         if (metadata?.kind !== "existing" || metadata.key !== key) return annotation;
@@ -860,7 +861,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
       setDiscussionThreads((threads) => threads.map((thread) => thread.id === nextThread.id ? nextThread : thread));
       setCommentCount((count) => count + 1);
     }
-  }, [data.revisionNumber, updateDiffItem]);
+  }, [data.revisionNumber, updateCommentItem]);
 
   const savePendingReply = useCallback((reply: PendingReply) => {
     setPendingReplies((current) => [...current.filter((entry) => entry.key !== reply.key), reply]);
@@ -934,7 +935,6 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   const renderAnnotation = useCallback((annotation: DiffLineAnnotation<CommentMetadata> | LineAnnotation<CommentMetadata>, item: CodeViewItem<CommentMetadata>) => {
     if (!annotation.metadata) return null;
     if (annotation.metadata.kind === "existing") {
-      if (!("side" in annotation) || item.type !== "diff") return null;
       return <ExistingDiscussion annotation={annotation} itemId={item.id} expanded={false} pendingReply={pendingReplies.find((reply) => reply.key === annotation.metadata?.key)} onToggle={toggleActiveDiscussion} onSaveDraft={savePendingReply} onDeleteDraft={deletePendingReply} />;
     }
     return annotation.metadata.kind === "draft"
@@ -943,8 +943,10 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   }, [deletePendingReply, pendingReplies, removeComment, saveComment, savePendingReply, toggleActiveDiscussion, toggleCommentSelection]);
 
   const renderHeaderPrefix = useCallback((item: CodeViewItem<CommentMetadata>) => {
-    if (item.type !== "diff") return null;
-    return <CollapseButton disabled={item.fileDiff.splitLineCount === 0 && item.fileDiff.unifiedLineCount === 0} collapsed={item.collapsed} onToggle={() => toggleCollapsed(item.id)} />;
+    const disabled = item.type === "diff"
+      ? item.fileDiff.splitLineCount === 0 && item.fileDiff.unifiedLineCount === 0
+      : item.file.contents.length === 0;
+    return <CollapseButton disabled={disabled} collapsed={item.collapsed} onToggle={() => toggleCollapsed(item.id)} />;
   }, [toggleCollapsed]);
 
   const scrollToItem = useCallback((itemId: string) => {
@@ -987,7 +989,8 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
 
   const selectDiscussion = useCallback(async (thread: DiscussionThread) => {
     const anchor = threadAnchor(thread, data.revisionNumber);
-    const itemId = pathToChangedId.get(anchor?.path ?? thread.path);
+    const path = anchor?.path ?? thread.path;
+    const itemId = path === "/COMMIT_MSG" ? "commit-message" : pathToChangedId.get(path);
     setActiveThreadKey(`gerrit:${thread.id}`);
     if (!itemId) return;
     if (!anchor) {
@@ -1047,13 +1050,22 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   const initials = data.owner.name.split(/\s+/).slice(0, 2).map((word) => word[0]).join("").toUpperCase();
   const activeThread = activeThreadKey ? discussionThreads.find((thread) => `gerrit:${thread.id}` === activeThreadKey) : undefined;
   const activeAnchor = activeThread ? threadAnchor(activeThread, data.revisionNumber) : undefined;
-  const activeItemId = activeAnchor ? pathToChangedId.get(activeAnchor.path) : undefined;
+  const activeItemId = activeAnchor
+    ? activeAnchor.path === "/COMMIT_MSG" ? "commit-message" : pathToChangedId.get(activeAnchor.path)
+    : undefined;
   const activeRange = activeAnchor ? commentRange(activeAnchor) : undefined;
-  const activeAnnotation: DiffLineAnnotation<CommentMetadata> | undefined = activeThread && activeRange ? {
-    side: activeRange.side ?? "additions",
-    lineNumber: activeRange.end,
-    metadata: { kind: "existing", key: `gerrit:${activeThread.id}`, range: activeRange, textRange: activeAnchor ? commentTextRange(activeAnchor) : undefined, thread: activeThread },
-  } : undefined;
+  const activeAnnotation: DiffLineAnnotation<CommentMetadata> | LineAnnotation<CommentMetadata> | undefined = activeThread && activeAnchor && activeRange
+    ? activeAnchor.path === "/COMMIT_MSG"
+      ? {
+          lineNumber: activeRange.end,
+          metadata: { kind: "existing", key: `gerrit:${activeThread.id}`, range: activeRange, textRange: commentTextRange(activeAnchor), thread: activeThread },
+        }
+      : {
+          side: activeRange.side ?? "additions",
+          lineNumber: activeRange.end,
+          metadata: { kind: "existing", key: `gerrit:${activeThread.id}`, range: activeRange, textRange: commentTextRange(activeAnchor), thread: activeThread },
+        }
+    : undefined;
 
   return (
     <div className={`review-layout${sidebarCollapsed ? " sidebar-collapsed" : ""}${activeAnnotation && activeItemId ? " with-discussion-panel" : ""}`}>

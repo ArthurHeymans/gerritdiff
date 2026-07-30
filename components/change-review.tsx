@@ -181,8 +181,23 @@ function threadPatchset(thread: DiscussionThread) {
   return thread.comments[0]?.patchSet;
 }
 
+// A Gerrit comment with a path but no line/range is a file-level comment; with the
+// reserved /PATCHSET_LEVEL path it applies to the whole patchset.
+function threadIsFileLevel(thread: DiscussionThread) {
+  const first = thread.comments[0];
+  return thread.path !== "/PATCHSET_LEVEL" && !first?.line && !first?.range;
+}
+
+function threadIsUnanchored(thread: DiscussionThread) {
+  return thread.path === "/PATCHSET_LEVEL" || threadIsFileLevel(thread);
+}
+
 function threadBelongsToPatchset(thread: DiscussionThread, revisionNumber: number) {
-  return Boolean(threadAnchor(thread, revisionNumber)) || (thread.path === "/PATCHSET_LEVEL" && threadPatchset(thread) === revisionNumber);
+  return Boolean(threadAnchor(thread, revisionNumber)) || (threadIsUnanchored(thread) && threadPatchset(thread) === revisionNumber);
+}
+
+function scopeLabel(path: string) {
+  return path === "/PATCHSET_LEVEL" ? "Patchset comments" : path === "/COMMIT_MSG" ? "Commit message comments" : "File comments";
 }
 
 function commentRange(comment: GerritComment): SelectedLineRange {
@@ -478,7 +493,9 @@ function ExistingDiscussion({ annotation, expanded, localReply, onToggle, onSave
         <span className="existing-thread-heading">
           <span className="existing-thread-path" title={metadata.thread.path}>{metadata.thread.path === "/PATCHSET_LEVEL" ? "Patchset-level comment" : metadata.thread.path}</span>
           <strong>{metadata.thread.comments.length === 1 ? "Review comment" : `${metadata.thread.comments.length} comment discussion`}</strong>
-          {metadata.textRange && <span className="comment-text-range">{textRangeLabel(metadata.textRange)}</span>}
+          {metadata.textRange
+            ? <span className="comment-text-range">{textRangeLabel(metadata.textRange)}</span>
+            : threadIsFileLevel(metadata.thread) ? <span className="comment-text-range">Whole file</span> : null}
         </span>
         <span className="thread-state">{unresolved ? "Unresolved" : "Resolved"}</span>
         <ChevronDown className="expanded-thread-chevron" size={14} />
@@ -532,7 +549,7 @@ function DiscussionSidebar({ threads, revisionNumber, onSelect }: { threads: Dis
     const patchset = threadPatchset(thread) ?? latest?.patchSet ?? revisionNumber;
     return (
       <button className={latest?.unresolved ? "sidebar-thread-unresolved" : "sidebar-thread-resolved"} key={thread.id} onClick={() => onSelect(thread)}>
-        <span className="discussion-path">{thread.path === "/PATCHSET_LEVEL" ? "Patchset-level comment" : thread.path}</span>
+        <span className="discussion-path">{thread.path === "/PATCHSET_LEVEL" ? "Patchset-level comment" : thread.path}{threadIsFileLevel(thread) ? " · whole file" : ""}</span>
         <span className="discussion-author"><strong>{thread.comments[0]?.author.name}</strong><i>{latest?.unresolved ? "Unresolved" : "Resolved"}</i></span>
         <p>{commentSummary(thread.comments[0]?.message ?? "")}</p>
         <span className="discussion-meta">{thread.comments.length} comment{thread.comments.length === 1 ? "" : "s"} · Patchset {patchset}{historical ? " · Switches patchset" : ""}</span>
@@ -646,9 +663,11 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   const [localReplies, setLocalReplies] = useState<LocalReply[]>([]);
   const [localReviewComments, setLocalReviewComments] = useState<LocalReviewComment[]>([]);
   const [activeThreadKey, setActiveThreadKey] = useState<string | null>(null);
-  const [patchsetDiscussionsOpen, setPatchsetDiscussionsOpen] = useState(false);
+  // null = closed; otherwise the path whose unanchored comments the panel shows
+  // ("/PATCHSET_LEVEL" for change-wide, or a file path for file-level).
+  const [commentScope, setCommentScope] = useState<string | null>(null);
   const pendingThreadRef = useRef<{ key: string; patchset: number } | null>(null);
-  const [patchsetDraft, setPatchsetDraft] = useState<{ key: string | null; message: string; resolved: boolean } | null>(null);
+  const [scopeDraft, setScopeDraft] = useState<{ key: string | null; message: string; resolved: boolean } | null>(null);
   const [relationPanelOpen, setRelationPanelOpen] = useState(data.relationChain.length > 1);
   const [publishOpen, setPublishOpen] = useState(false);
   const [sshUser, setSshUser] = useState("");
@@ -682,6 +701,14 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   const currentDiscussionCount = discussionThreads.filter((thread) => threadBelongsToPatchset(thread, data.revisionNumber)).length;
   const patchsetLevelThreads = discussionThreads.filter((thread) => thread.path === "/PATCHSET_LEVEL" && threadPatchset(thread) === data.revisionNumber);
   const unresolvedPatchsetDiscussionCount = patchsetLevelThreads.filter((thread) => thread.comments.at(-1)?.unresolved).length;
+  const fileLevelThreads = useMemo(() => {
+    const byPath = new Map<string, DiscussionThread[]>();
+    for (const thread of discussionThreads) {
+      if (!threadIsFileLevel(thread) || !threadBelongsToPatchset(thread, data.revisionNumber)) continue;
+      byPath.set(thread.path, [...(byPath.get(thread.path) ?? []), thread]);
+    }
+    return byPath;
+  }, [data.revisionNumber, discussionThreads]);
   const initialItems = useMemo<CodeViewItem<CommentMetadata>[]>(
     () => [
       ...(commitMessageContent ? [{
@@ -1009,7 +1036,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
       const next = current === key ? null : key;
       if (next) {
         setRelationPanelOpen(false);
-        setPatchsetDiscussionsOpen(false);
+        setCommentScope(null);
       }
       saveProjectUiSettings(data.host, data.project, { rightPanelOpen: Boolean(next) });
       return next;
@@ -1033,19 +1060,51 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
 
   const localCommentCount = localReviewComments.length + localReplies.length;
   const localPatchsetComments = useMemo(() => localReviewComments.filter((comment) => comment.path === "/PATCHSET_LEVEL"), [localReviewComments]);
+  const localFileLevelComments = useMemo(() => {
+    const byPath = new Map<string, LocalReviewComment[]>();
+    for (const comment of localReviewComments) {
+      if (comment.path === "/PATCHSET_LEVEL" || comment.range.end > 0) continue;
+      byPath.set(comment.path, [...(byPath.get(comment.path) ?? []), comment]);
+    }
+    return byPath;
+  }, [localReviewComments]);
 
-  const savePatchsetComment = useCallback((key: string | null, message: string, resolved: boolean) => {
-    const entryKey = key ?? `patchset-level-${nextCommentRef.current++}`;
+  const scopeThreads = useMemo(
+    () => commentScope
+      ? commentScope === "/PATCHSET_LEVEL" ? patchsetLevelThreads : fileLevelThreads.get(commentScope) ?? []
+      : [],
+    [commentScope, fileLevelThreads, patchsetLevelThreads],
+  );
+  const scopeDrafts = useMemo(
+    () => commentScope
+      ? commentScope === "/PATCHSET_LEVEL" ? localPatchsetComments : localFileLevelComments.get(commentScope) ?? []
+      : [],
+    [commentScope, localFileLevelComments, localPatchsetComments],
+  );
+
+  const openCommentScope = useCallback((path: string | null) => {
+    setRelationPanelOpen(false);
+    setActiveThreadKey(null);
+    setScopeDraft(null);
+    setCommentScope((current) => {
+      const next = current === path ? null : path;
+      saveProjectUiSettings(data.host, data.project, { rightPanelOpen: Boolean(next) });
+      return next;
+    });
+  }, [data.host, data.project]);
+
+  const saveScopeComment = useCallback((path: string, key: string | null, message: string, resolved: boolean) => {
+    const entryKey = key ?? `scope-${nextCommentRef.current++}`;
     setLocalReviewComments((current) => [
       ...current.filter((comment) => comment.key !== entryKey),
-      { key: entryKey, path: "/PATCHSET_LEVEL", message, range: { start: 0, end: 0, side: "additions", endSide: "additions" }, unresolved: !resolved },
+      { key: entryKey, path, message, range: { start: 0, end: 0, side: "additions", endSide: "additions" }, unresolved: !resolved },
     ]);
-    setPatchsetDraft(null);
+    setScopeDraft(null);
   }, []);
 
-  const deletePatchsetComment = useCallback((key: string) => {
+  const deleteScopeComment = useCallback((key: string) => {
     setLocalReviewComments((current) => current.filter((comment) => comment.key !== key));
-    setPatchsetDraft((draft) => draft?.key === key ? null : draft);
+    setScopeDraft((draft) => draft?.key === key ? null : draft);
   }, []);
 
   const combinedReviewComments = useMemo(() => [
@@ -1140,7 +1199,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   const selectDiscussion = useCallback(async (thread: DiscussionThread) => {
     const key = `gerrit:${thread.id}`;
     setRelationPanelOpen(false);
-    setPatchsetDiscussionsOpen(false);
+    setCommentScope(null);
     setActiveThreadKey(key);
     saveProjectUiSettings(data.host, data.project, { rightPanelOpen: true });
 
@@ -1212,15 +1271,34 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   }, [data.revision, data.sourceUrl, loadingItems, pathToChangedId, scrollToItem]);
 
   const renderHeaderMetadata = useCallback((item: CodeViewItem<CommentMetadata>) => {
-    if (item.type !== "diff" || !item.fileDiff.isPartial) return null;
+    const path = item.type === "diff" ? item.fileDiff.name : item.id === "commit-message" ? "/COMMIT_MSG" : undefined;
     const loading = loadingItems.has(item.id);
+    const threads = path ? fileLevelThreads.get(path) ?? [] : [];
+    const drafts = path ? localFileLevelComments.get(path) ?? [] : [];
+    const unresolved = threads.filter((thread) => thread.comments.at(-1)?.unresolved).length;
+    const total = threads.length + drafts.length;
     return (
-      <button className="load-full-file" disabled={loading} onClick={(event) => { event.preventDefault(); event.stopPropagation(); void loadFullDiff(item.id); }}>
-        {loading ? <LoaderCircle className="spinner" size={12} /> : <FileText size={12} />}
-        {loading ? "Loading…" : "Load full file"}
-      </button>
+      <>
+        {path && (
+          <button
+            className={`file-comments-button${unresolved > 0 ? " has-unresolved" : ""}${commentScope === path ? " is-open" : ""}`}
+            title={total ? `${total} file-level comment${total === 1 ? "" : "s"}${unresolved ? `, ${unresolved} unresolved` : ""}` : "Comment on this file as a whole"}
+            onClick={(event) => { event.preventDefault(); event.stopPropagation(); openCommentScope(path); }}
+          >
+            <MessageSquare size={12} />
+            {total > 0 && <b>{total}</b>}
+            <span>{total ? "File comments" : "Comment on file"}</span>
+          </button>
+        )}
+        {item.type === "diff" && item.fileDiff.isPartial && (
+          <button className="load-full-file" disabled={loading} onClick={(event) => { event.preventDefault(); event.stopPropagation(); void loadFullDiff(item.id); }}>
+            {loading ? <LoaderCircle className="spinner" size={12} /> : <FileText size={12} />}
+            {loading ? "Loading…" : "Load full file"}
+          </button>
+        )}
+      </>
     );
-  }, [loadFullDiff, loadingItems]);
+  }, [commentScope, fileLevelThreads, loadFullDiff, loadingItems, localFileLevelComments, openCommentScope]);
 
   const initials = data.owner.name.split(/\s+/).slice(0, 2).map((word) => word[0]).join("").toUpperCase();
   const activeThread = activeThreadKey ? discussionThreads.find((thread) => `gerrit:${thread.id}` === activeThreadKey) : undefined;
@@ -1254,7 +1332,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
         }
       : undefined);
 
-  const discussionPanelVisible = patchsetDiscussionsOpen || Boolean(activePanelAnnotation);
+  const discussionPanelVisible = commentScope !== null || Boolean(activePanelAnnotation);
   const sidePanelVisible = relationPanelOpen || discussionPanelVisible;
 
   return (
@@ -1315,7 +1393,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
               aria-expanded={relationPanelOpen}
               title={`${data.relationChain.length} change${data.relationChain.length === 1 ? "" : "s"} in the relation chain`}
               onClick={() => {
-                setPatchsetDiscussionsOpen(false);
+                setCommentScope(null);
                 setActiveThreadKey(null);
                 setRelationPanelOpen((open) => {
                   const next = !open;
@@ -1331,18 +1409,12 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
             <button
               type="button"
               className={`patchset-discussions-button${unresolvedPatchsetDiscussionCount > 0 ? " has-unresolved" : ""}`}
-              aria-expanded={patchsetDiscussionsOpen}
+              aria-expanded={commentScope === "/PATCHSET_LEVEL"}
               title={patchsetLevelThreads.length
                 ? `${patchsetLevelThreads.length} patchset-level comment${patchsetLevelThreads.length === 1 ? "" : "s"}${unresolvedPatchsetDiscussionCount ? `, ${unresolvedPatchsetDiscussionCount} unresolved` : ""}`
                 : "Comment on the whole patchset, not a specific file"}
               onClick={() => {
-                setRelationPanelOpen(false);
-                setActiveThreadKey(null);
-                setPatchsetDiscussionsOpen((open) => {
-                  const next = !open;
-                  saveProjectUiSettings(data.host, data.project, { rightPanelOpen: next });
-                  return next;
-                });
+                openCommentScope("/PATCHSET_LEVEL");
               }}
             >
               <MessageSquare size={12} />
@@ -1429,17 +1501,21 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
       </section>
 
       {sidePanelVisible && (
-        <aside className="discussion-panel" aria-label={relationPanelOpen ? "Relation chain" : patchsetDiscussionsOpen ? "Patchset discussions" : "Selected discussion"}>
+        <aside className="discussion-panel" aria-label={relationPanelOpen ? "Relation chain" : commentScope ? scopeLabel(commentScope) : "Selected discussion"}>
           <div className="discussion-panel-head">
             <div>
-              <span>{relationPanelOpen ? "Relation chain" : patchsetDiscussionsOpen ? "Patchset discussions" : "Discussion"}</span>
-              <strong>{relationPanelOpen ? `${data.relationChain.length} change${data.relationChain.length === 1 ? "" : "s"}` : patchsetDiscussionsOpen ? `Patchset ${data.revisionNumber} · ${patchsetLevelThreads.length} thread${patchsetLevelThreads.length === 1 ? "" : "s"}${localPatchsetComments.length ? `, ${localPatchsetComments.length} draft` : ""}` : `${activeThread?.comments.length ?? 0} comment${activeThread?.comments.length === 1 ? "" : "s"}`}</strong>
+              <span>{relationPanelOpen ? "Relation chain" : commentScope ? scopeLabel(commentScope) : "Discussion"}</span>
+              <strong title={commentScope ?? undefined}>{relationPanelOpen
+                ? `${data.relationChain.length} change${data.relationChain.length === 1 ? "" : "s"}`
+                : commentScope
+                  ? `${commentScope === "/PATCHSET_LEVEL" ? `Patchset ${data.revisionNumber}` : commentScope} · ${scopeThreads.length} thread${scopeThreads.length === 1 ? "" : "s"}${scopeDrafts.length ? `, ${scopeDrafts.length} draft` : ""}`
+                  : `${activeThread?.comments.length ?? 0} comment${activeThread?.comments.length === 1 ? "" : "s"}`}</strong>
             </div>
-            <button type="button" onClick={() => { setRelationPanelOpen(false); setPatchsetDiscussionsOpen(false); setActiveThreadKey(null); saveProjectUiSettings(data.host, data.project, { rightPanelOpen: false }); }} aria-label="Close side panel"><X size={15} /></button>
+            <button type="button" onClick={() => { setRelationPanelOpen(false); setCommentScope(null); setActiveThreadKey(null); saveProjectUiSettings(data.host, data.project, { rightPanelOpen: false }); }} aria-label="Close side panel"><X size={15} /></button>
           </div>
-          <div className={`discussion-panel-body${patchsetDiscussionsOpen && !relationPanelOpen ? " patchset-discussion-list" : ""}`}>
+          <div className={`discussion-panel-body${commentScope && !relationPanelOpen ? " patchset-discussion-list" : ""}`}>
             {relationPanelOpen ? <RelationChainPanel relations={data.relationChain} /> : null}
-            {!relationPanelOpen && patchsetDiscussionsOpen ? patchsetLevelThreads.map((thread) => {
+            {!relationPanelOpen && commentScope ? scopeThreads.map((thread) => {
               const range = commentRange(thread.comments[0]);
               const annotation: LineAnnotation<CommentMetadata> = {
                 lineNumber: 0,
@@ -1457,54 +1533,56 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
                 />
               );
             }) : null}
-            {patchsetDiscussionsOpen && !relationPanelOpen && (
+            {commentScope && !relationPanelOpen && (
               <>
-                {localPatchsetComments.map((comment) => (
+                {scopeDrafts.map((comment) => (
                   <div className="comment-card patchset-draft-card" key={comment.key}>
                     <div className="patchset-draft-head">
-                      <strong>Patchset comment draft</strong>
+                      <strong>{commentScope === "/PATCHSET_LEVEL" ? "Patchset comment draft" : "File comment draft"}</strong>
                       <span className={`thread-state ${comment.unresolved ? "is-unresolved" : "is-resolved"}`}>{comment.unresolved ? "Unresolved" : "Resolved"}</span>
                     </div>
                     <p>{comment.message}</p>
                     <div className="discussion-actions">
-                      <button onClick={() => setPatchsetDraft({ key: comment.key, message: comment.message, resolved: !comment.unresolved })}>Edit</button>
-                      <button onClick={() => deletePatchsetComment(comment.key)}>Discard</button>
+                      <button onClick={() => setScopeDraft({ key: comment.key, message: comment.message, resolved: !comment.unresolved })}>Edit</button>
+                      <button onClick={() => deleteScopeComment(comment.key)}>Discard</button>
                     </div>
                   </div>
                 ))}
-                {patchsetDraft ? (
+                {scopeDraft ? (
                   <form
                     className="comment-card discussion-reply patchset-composer"
                     onSubmit={(event) => {
                       event.preventDefault();
-                      const trimmed = patchsetDraft.message.trim();
-                      if (trimmed) savePatchsetComment(patchsetDraft.key, trimmed, patchsetDraft.resolved);
+                      const trimmed = scopeDraft.message.trim();
+                      if (trimmed) saveScopeComment(commentScope, scopeDraft.key, trimmed, scopeDraft.resolved);
                     }}
                   >
-                    <textarea autoFocus rows={4} value={patchsetDraft.message} onChange={(event) => setPatchsetDraft((draft) => draft ? { ...draft, message: event.target.value } : draft)} placeholder="Comment on the whole patchset…" />
+                    <textarea autoFocus rows={4} value={scopeDraft.message} onChange={(event) => setScopeDraft((draft) => draft ? { ...draft, message: event.target.value } : draft)} placeholder={commentScope === "/PATCHSET_LEVEL" ? "Comment on the whole patchset…" : "Comment on this file as a whole…"} />
                     <div className="reply-options">
-                      <button className={`resolution-toggle ${patchsetDraft.resolved ? "is-resolved" : "is-unresolved"}`} type="button" aria-pressed={patchsetDraft.resolved} onClick={() => setPatchsetDraft((draft) => draft ? { ...draft, resolved: !draft.resolved } : draft)}>
-                        <CircleCheck size={12} /> {patchsetDraft.resolved ? "Resolved" : "Unresolved"}
+                      <button className={`resolution-toggle ${scopeDraft.resolved ? "is-resolved" : "is-unresolved"}`} type="button" aria-pressed={scopeDraft.resolved} onClick={() => setScopeDraft((draft) => draft ? { ...draft, resolved: !draft.resolved } : draft)}>
+                        <CircleCheck size={12} /> {scopeDraft.resolved ? "Resolved" : "Unresolved"}
                       </button>
                       <span>Unresolved comments block until someone marks them done.</span>
                     </div>
                     <div>
-                      <span>Sent as a <code>/PATCHSET_LEVEL</code> comment when you publish.</span>
-                      <button type="button" onClick={() => setPatchsetDraft(null)}>Cancel</button>
-                      <button type="submit" disabled={!patchsetDraft.message.trim()}>Save comment</button>
+                      <span>{commentScope === "/PATCHSET_LEVEL" ? <>Sent as a <code>/PATCHSET_LEVEL</code> comment when you publish.</> : <>Sent as a file comment on <code>{commentScope}</code> when you publish.</>}</span>
+                      <button type="button" onClick={() => setScopeDraft(null)}>Cancel</button>
+                      <button type="submit" disabled={!scopeDraft.message.trim()}>Save comment</button>
                     </div>
                   </form>
                 ) : (
-                  <button type="button" className="patchset-add-comment" onClick={() => setPatchsetDraft({ key: null, message: "", resolved: false })}>
-                    <MessageSquare size={13} /> Add patchset comment
+                  <button type="button" className="patchset-add-comment" onClick={() => setScopeDraft({ key: null, message: "", resolved: false })}>
+                    <MessageSquare size={13} /> {commentScope === "/PATCHSET_LEVEL" ? "Add patchset comment" : "Add file comment"}
                   </button>
                 )}
-                {patchsetLevelThreads.length === 0 && localPatchsetComments.length === 0 && !patchsetDraft && (
-                  <p className="patchset-empty-hint">Patchset comments apply to the change as a whole instead of a file or line — and unlike the cover message, they can be resolved and replied to.</p>
+                {scopeThreads.length === 0 && scopeDrafts.length === 0 && !scopeDraft && (
+                  <p className="patchset-empty-hint">{commentScope === "/PATCHSET_LEVEL"
+                    ? "Patchset comments apply to the change as a whole instead of a file or line — and unlike the cover message, they can be resolved and replied to."
+                    : "File comments apply to the whole file instead of a specific line — useful for “this file should be split up” style feedback."}</p>
                 )}
               </>
             )}
-            {!patchsetDiscussionsOpen && !relationPanelOpen && activePanelAnnotation ? (
+            {!commentScope && !relationPanelOpen && activePanelAnnotation ? (
               <ExistingDiscussion
                 annotation={activePanelAnnotation}
                 expanded

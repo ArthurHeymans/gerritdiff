@@ -17,7 +17,7 @@ import {
 import { CodeView, type CodeViewHandle, WorkerPoolContextProvider } from "@pierre/diffs/react";
 import type { GitStatus, GitStatusEntry } from "@pierre/trees";
 import { FileTree, useFileTree } from "@pierre/trees/react";
-import { Check, ChevronDown, CircleCheck, Columns2, Copy, FileText, GitBranch, LoaderCircle, MessageSquare, PanelLeftClose, PanelLeftOpen, Pilcrow, Quote, Reply, Rows3, Send, Terminal, Trash2, X } from "lucide-react";
+import { Check, ChevronDown, CircleCheck, Columns2, Copy, FileText, GitBranch, LoaderCircle, MessageSquare, PanelLeftClose, PanelLeftOpen, Pilcrow, Quote, Reply, Rows3, Send, Settings2, Terminal, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RepositoryBrowser } from "@/components/repository-browser";
 import type { ChangeData, GerritComment, RelatedChange } from "@/lib/types";
@@ -33,7 +33,7 @@ type CommentMetadata =
   | { kind: "existing"; key: string; range: SelectedLineRange; textRange?: GerritTextRange; thread: DiscussionThread };
 
 type ActiveDraft = { itemId: string; key: string };
-type PendingReply = { itemId: string; key: string; message: string; resolved: boolean };
+type LocalReply = { key: string; message: string; resolved: boolean };
 type LocalReviewComment = { key: string; path: string; message: string; range: SelectedLineRange; textRange?: GerritTextRange; inReplyTo?: string; unresolved?: boolean };
 type CodeTextSelection = { itemId: string; range: SelectedLineRange; textRange: GerritTextRange; top: number; left: number };
 type GerritCommentInput = {
@@ -427,19 +427,19 @@ function CommentText({ comment }: { comment: GerritComment }) {
   );
 }
 
-function ExistingDiscussion({ annotation, itemId, expanded, pendingReply, onToggle, onSaveDraft, onDeleteDraft }: { annotation: DiffLineAnnotation<CommentMetadata> | LineAnnotation<CommentMetadata>; itemId: string; expanded: boolean; pendingReply?: PendingReply; onToggle(key: string): void; onSaveDraft(reply: PendingReply): void; onDeleteDraft(key: string): void }) {
+function ExistingDiscussion({ annotation, expanded, localReply, onToggle, onSaveReply, onDeleteReply }: { annotation: DiffLineAnnotation<CommentMetadata> | LineAnnotation<CommentMetadata>; expanded: boolean; localReply?: LocalReply; onToggle(key: string): void; onSaveReply(reply: LocalReply): void; onDeleteReply(key: string): void }) {
   const metadata = annotation.metadata;
-  const [draft, setDraft] = useState<{ message: string; resolved: boolean } | null>(null);
+  const [replyEditor, setReplyEditor] = useState<{ message: string; resolved: boolean } | null>(null);
   if (!metadata || metadata.kind !== "existing") return null;
   const latest = metadata.thread.comments.at(-1);
   const unresolved = latest?.unresolved ?? false;
-  const openDraft = (message = "", resolved = !unresolved) => setDraft({ message, resolved });
-  const saveDraft = () => {
-    if (!draft) return;
-    const trimmed = draft.message.trim();
+  const openReply = (message = "", resolved = !unresolved) => setReplyEditor({ message, resolved });
+  const saveReply = () => {
+    if (!replyEditor) return;
+    const trimmed = replyEditor.message.trim();
     if (!trimmed) return;
-    onSaveDraft({ itemId, key: metadata.key, message: trimmed, resolved: draft.resolved });
-    setDraft(null);
+    onSaveReply({ key: metadata.key, message: trimmed, resolved: replyEditor.resolved });
+    setReplyEditor(null);
   };
   if (!expanded) {
     return (
@@ -450,7 +450,7 @@ function ExistingDiscussion({ annotation, itemId, expanded, pendingReply, onTogg
             <span><strong>{latest?.author.name ?? "Review discussion"}</strong><small>{metadata.thread.comments.length} comment{metadata.thread.comments.length === 1 ? "" : "s"}</small></span>
             <span>{commentSummary(latest?.message ?? "")}</span>
           </span>
-          {pendingReply && <span className="collapsed-thread-draft">Draft</span>}
+          {localReply && <span className="collapsed-thread-pending">Pending</span>}
           <span className="thread-state">{unresolved ? "Unresolved" : "Resolved"}</span>
           <ChevronDown size={14} />
         </button>
@@ -479,29 +479,29 @@ function ExistingDiscussion({ annotation, itemId, expanded, pendingReply, onTogg
           </div>
         </div>
       ))}
-      {pendingReply && draft === null && (
-        <div className={`pending-reply ${pendingReply.resolved ? "pending-resolves" : "pending-unresolved"}`}>
-          <div><strong>Draft reply</strong><span className={`pending-resolution ${pendingReply.resolved ? "resolves" : "unresolved"}`}>{pendingReply.resolved ? <CircleCheck size={11} /> : <MessageSquare size={11} />}{pendingReply.resolved ? "Resolves discussion" : "Keeps discussion unresolved"}</span></div>
-          <p>{pendingReply.message}</p>
-          <div><button onClick={() => setDraft({ message: pendingReply.message, resolved: pendingReply.resolved })}>Edit</button><button onClick={() => onDeleteDraft(metadata.key)}>Discard</button></div>
+      {localReply && replyEditor === null && (
+        <div className={`pending-reply ${localReply.resolved ? "pending-resolves" : "pending-unresolved"}`}>
+          <div><strong>Reply queued for review</strong><span className={`pending-resolution ${localReply.resolved ? "resolves" : "unresolved"}`}>{localReply.resolved ? <CircleCheck size={11} /> : <MessageSquare size={11} />}{localReply.resolved ? "Resolves discussion" : "Keeps discussion unresolved"}</span></div>
+          <p>{localReply.message}</p>
+          <div><button onClick={() => setReplyEditor({ message: localReply.message, resolved: localReply.resolved })}>Edit</button><button onClick={() => onDeleteReply(metadata.key)}>Discard</button></div>
         </div>
       )}
       <div className="discussion-actions">
-        <button onClick={() => openDraft(pendingReply?.message ?? "", pendingReply?.resolved ?? !unresolved)}><Reply size={12} /> Reply</button>
-        <button onClick={() => openDraft(`${(latest?.message ?? "").split("\n").map((line) => `> ${line}`).join("\n")}\n\n`, pendingReply?.resolved ?? !unresolved)}><Quote size={12} /> Quote</button>
-        <button onClick={() => onSaveDraft({ itemId, key: metadata.key, message: "Ack", resolved: true })}><Check size={12} /> Ack</button>
-        <button onClick={() => onSaveDraft({ itemId, key: metadata.key, message: "Done", resolved: true })}><CircleCheck size={12} /> Done</button>
+        <button onClick={() => openReply(localReply?.message ?? "", localReply?.resolved ?? !unresolved)}><Reply size={12} /> Reply</button>
+        <button onClick={() => openReply(`${(latest?.message ?? "").split("\n").map((line) => `> ${line}`).join("\n")}\n\n`, localReply?.resolved ?? !unresolved)}><Quote size={12} /> Quote</button>
+        <button onClick={() => onSaveReply({ key: metadata.key, message: "Ack", resolved: true })}><Check size={12} /> Ack</button>
+        <button onClick={() => onSaveReply({ key: metadata.key, message: "Done", resolved: true })}><CircleCheck size={12} /> Done</button>
       </div>
-      {draft !== null && (
-        <form className="discussion-reply" onSubmit={(event) => { event.preventDefault(); saveDraft(); }}>
-          <textarea autoFocus rows={3} value={draft.message} onChange={(event) => setDraft((current) => current ? { ...current, message: event.target.value } : current)} placeholder="Write a reply…" />
+      {replyEditor !== null && (
+        <form className="discussion-reply" onSubmit={(event) => { event.preventDefault(); saveReply(); }}>
+          <textarea autoFocus rows={3} value={replyEditor.message} onChange={(event) => setReplyEditor((current) => current ? { ...current, message: event.target.value } : current)} placeholder="Write a reply…" />
           <div className="reply-options">
-            <button className={`resolution-toggle ${draft.resolved ? "is-resolved" : "is-unresolved"}`} type="button" aria-pressed={draft.resolved} onClick={() => setDraft((current) => current ? { ...current, resolved: !current.resolved } : current)}>
-              <CircleCheck size={12} /> {draft.resolved ? "Resolved" : "Unresolved"}
+            <button className={`resolution-toggle ${replyEditor.resolved ? "is-resolved" : "is-unresolved"}`} type="button" aria-pressed={replyEditor.resolved} onClick={() => setReplyEditor((current) => current ? { ...current, resolved: !current.resolved } : current)}>
+              <CircleCheck size={12} /> {replyEditor.resolved ? "Resolved" : "Unresolved"}
             </button>
             <span>Toggle whether this discussion still needs action.</span>
           </div>
-          <div><span>Save this draft, then push all replies from the toolbar.</span><button type="button" onClick={() => setDraft(null)}>Cancel</button><button type="submit" disabled={!draft.message.trim()}>Save draft</button></div>
+          <div><span>This reply will be included when you publish the review.</span><button type="button" onClick={() => setReplyEditor(null)}>Cancel</button><button type="submit" disabled={!replyEditor.message.trim()}>Save reply</button></div>
         </form>
       )}
     </div>
@@ -620,7 +620,6 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   const nextCommentRef = useRef(1);
   const [selectedLines, setSelectedLines] = useState<CodeViewLineSelection | null>(null);
   const [codeTextSelection, setCodeTextSelection] = useState<CodeTextSelection | null>(null);
-  const [commentCount, setCommentCount] = useState(0);
   const [diffStyle, setDiffStyle] = useState<"split" | "unified">("split");
   const [showWhitespace, setShowWhitespace] = useState(false);
   const [tabSize, setTabSize] = useState(2);
@@ -629,7 +628,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   const [knownPath, setKnownPath] = useState("");
   const [repositoryError, setRepositoryError] = useState("");
   const [loadingItems, setLoadingItems] = useState<ReadonlySet<string>>(() => new Set());
-  const [pendingReplies, setPendingReplies] = useState<PendingReply[]>([]);
+  const [localReplies, setLocalReplies] = useState<LocalReply[]>([]);
   const [localReviewComments, setLocalReviewComments] = useState<LocalReviewComment[]>([]);
   const [activeThreadKey, setActiveThreadKey] = useState<string | null>(null);
   const [patchsetDiscussionsOpen, setPatchsetDiscussionsOpen] = useState(false);
@@ -662,7 +661,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
       return [fileDiff];
     });
   }, [data.baseRevisionNumber, data.changeNumber, data.comparisonFiles, data.host, data.patch, data.revision, data.revisionNumber]);
-  const [discussionThreads, setDiscussionThreads] = useState(() => buildDiscussionThreads(data.comments));
+  const discussionThreads = useMemo(() => buildDiscussionThreads(data.comments), [data.comments]);
   const currentDiscussionCount = discussionThreads.filter((thread) => threadBelongsToPatchset(thread, data.revisionNumber)).length;
   const patchsetLevelThreads = discussionThreads.filter((thread) => thread.path === "/PATCHSET_LEVEL" && threadPatchset(thread) === data.revisionNumber);
   const unresolvedPatchsetDiscussionCount = patchsetLevelThreads.filter((thread) => thread.comments.at(-1)?.unresolved).length;
@@ -863,7 +862,6 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
       return true;
     });
     if (removedSaved) {
-      setCommentCount((count) => Math.max(0, count - 1));
       setLocalReviewComments((comments) => comments.filter((comment) => comment.key !== key));
     }
     if (activeDraftRef.current?.key === key) activeDraftRef.current = null;
@@ -897,7 +895,6 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
         ]);
       }
       activeDraftRef.current = null;
-      setCommentCount((count) => count + 1);
       setSelectedLines(null);
     }
   }, [updateCommentItem]);
@@ -982,70 +979,12 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     },
   }), [createDraft, diffStyle, renderWhitespaceMarkers, tabSize, theme]);
 
-  const addDiscussionReply = useCallback((itemId: string, key: string, message: string, resolved: boolean) => {
-    const timestamp = new Date().toISOString();
-    let updatedThread: DiscussionThread | undefined;
-    const patchsetThread = itemId.startsWith("patchset-level:")
-      ? discussionThreads.find((thread) => `gerrit:${thread.id}` === key)
-      : undefined;
-    if (patchsetThread) {
-      const latest = patchsetThread.comments.at(-1);
-      const anchor = patchsetThread.comments[0];
-      if (!latest || !anchor) return;
-      const reply: GerritComment = {
-        id: `local-reply-${nextCommentRef.current++}`,
-        path: "/PATCHSET_LEVEL",
-        patchSet: data.revisionNumber,
-        side: "REVISION",
-        author: { name: "You" },
-        message,
-        updated: timestamp,
-        unresolved: !resolved,
-        inReplyTo: latest.id,
-      };
-      updatedThread = { ...patchsetThread, comments: [...patchsetThread.comments, reply] };
-      setDiscussionThreads((threads) => threads.map((thread) => thread.id === updatedThread?.id ? updatedThread : thread));
-      setCommentCount((count) => count + 1);
-      return;
-    }
-    updateCommentItem(itemId, (item) => {
-      item.annotations = item.annotations?.map((annotation) => {
-        const metadata = annotation.metadata;
-        if (metadata?.kind !== "existing" || metadata.key !== key) return annotation;
-        const latest = metadata.thread.comments.at(-1);
-        const anchor = threadAnchor(metadata.thread, data.revisionNumber) ?? metadata.thread.comments[0];
-        if (!latest || !anchor) return annotation;
-        const reply: GerritComment = {
-          id: `local-reply-${nextCommentRef.current++}`,
-          path: anchor.path,
-          patchSet: data.revisionNumber,
-          line: anchor.line,
-          side: anchor.side,
-          range: anchor.range,
-          author: { name: "You" },
-          message,
-          updated: timestamp,
-          unresolved: !resolved,
-          inReplyTo: latest.id,
-        };
-        updatedThread = { ...metadata.thread, comments: [...metadata.thread.comments, reply] };
-        return { ...annotation, metadata: { ...metadata, thread: updatedThread } };
-      });
-      return Boolean(updatedThread);
-    });
-    if (updatedThread) {
-      const nextThread = updatedThread;
-      setDiscussionThreads((threads) => threads.map((thread) => thread.id === nextThread.id ? nextThread : thread));
-      setCommentCount((count) => count + 1);
-    }
-  }, [data.revisionNumber, discussionThreads, updateCommentItem]);
-
-  const savePendingReply = useCallback((reply: PendingReply) => {
-    setPendingReplies((current) => [...current.filter((entry) => entry.key !== reply.key), reply]);
+  const saveLocalReply = useCallback((reply: LocalReply) => {
+    setLocalReplies((current) => [...current.filter((entry) => entry.key !== reply.key), reply]);
   }, []);
 
-  const deletePendingReply = useCallback((key: string) => {
-    setPendingReplies((current) => current.filter((entry) => entry.key !== key));
+  const deleteLocalReply = useCallback((key: string) => {
+    setLocalReplies((current) => current.filter((entry) => entry.key !== key));
   }, []);
 
   const toggleActiveDiscussion = useCallback((key: string) => {
@@ -1056,7 +995,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     });
   }, [data.host, data.project]);
 
-  const pendingReplyComments = useMemo<LocalReviewComment[]>(() => pendingReplies.flatMap((reply) => {
+  const localReplyComments = useMemo<LocalReviewComment[]>(() => localReplies.flatMap((reply) => {
     const thread = discussionThreads.find((candidate) => `gerrit:${candidate.id}` === reply.key);
     const anchor = thread ? threadAnchor(thread, data.revisionNumber) ?? thread.comments[0] : undefined;
     const latestPublished = thread?.comments.findLast((comment) => !comment.id.startsWith("local-reply-"));
@@ -1069,22 +1008,15 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
       inReplyTo: latestPublished.id,
       unresolved: !reply.resolved,
     }];
-  }), [data.revisionNumber, discussionThreads, pendingReplies]);
+  }), [data.revisionNumber, discussionThreads, localReplies]);
 
-  const pushPendingReplies = useCallback(() => {
-    setLocalReviewComments((comments) => [
-      ...comments.filter((comment) => !pendingReplyComments.some((reply) => reply.key === comment.key)),
-      ...pendingReplyComments,
-    ]);
-    for (const reply of pendingReplies) addDiscussionReply(reply.itemId, reply.key, reply.message, reply.resolved);
-    setPendingReplies([]);
-  }, [addDiscussionReply, pendingReplies, pendingReplyComments]);
+  const localCommentCount = localReviewComments.length + localReplies.length;
 
   const generatedReview = useMemo(() => {
     const comments: Record<string, GerritCommentInput[]> = {};
     const combined = [
-      ...localReviewComments.filter((comment) => !pendingReplyComments.some((reply) => reply.key === comment.key)),
-      ...pendingReplyComments,
+      ...localReviewComments.filter((comment) => !localReplyComments.some((reply) => reply.key === comment.key)),
+      ...localReplyComments,
     ];
     for (const comment of combined) {
       const file = files.find((candidate) => candidate.name === comment.path);
@@ -1095,7 +1027,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     if (codeReview) input.labels = { "Code-Review": Number(codeReview) };
     if (Object.keys(comments).length) input.comments = comments;
     return reviewCommand(sshHost.trim() || data.host, sshPort, sshUser, data.changeNumber, data.revisionNumber, input);
-  }, [codeReview, data.changeNumber, data.host, data.revisionNumber, files, localReviewComments, pendingReplyComments, reviewMessage, sshHost, sshPort, sshUser]);
+  }, [codeReview, data.changeNumber, data.host, data.revisionNumber, files, localReviewComments, localReplyComments, reviewMessage, sshHost, sshPort, sshUser]);
 
   const copyGeneratedReview = useCallback(async () => {
     await navigator.clipboard.writeText(generatedReview);
@@ -1116,12 +1048,12 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   const renderAnnotation = useCallback((annotation: DiffLineAnnotation<CommentMetadata> | LineAnnotation<CommentMetadata>, item: CodeViewItem<CommentMetadata>) => {
     if (!annotation.metadata) return null;
     if (annotation.metadata.kind === "existing") {
-      return <ExistingDiscussion annotation={annotation} itemId={item.id} expanded={false} pendingReply={pendingReplies.find((reply) => reply.key === annotation.metadata?.key)} onToggle={toggleActiveDiscussion} onSaveDraft={savePendingReply} onDeleteDraft={deletePendingReply} />;
+      return <ExistingDiscussion annotation={annotation} expanded={false} localReply={localReplies.find((reply) => reply.key === annotation.metadata?.key)} onToggle={toggleActiveDiscussion} onSaveReply={saveLocalReply} onDeleteReply={deleteLocalReply} />;
     }
     return annotation.metadata.kind === "draft"
       ? <DraftComment annotation={annotation} itemId={item.id} onCancel={removeComment} onSave={saveComment} />
       : <SavedComment annotation={annotation} itemId={item.id} onDelete={removeComment} onSelect={toggleCommentSelection} />;
-  }, [deletePendingReply, pendingReplies, removeComment, saveComment, savePendingReply, toggleActiveDiscussion, toggleCommentSelection]);
+  }, [deleteLocalReply, localReplies, removeComment, saveComment, saveLocalReply, toggleActiveDiscussion, toggleCommentSelection]);
 
   const renderHeaderPrefix = useCallback((item: CodeViewItem<CommentMetadata>) => {
     const disabled = item.type === "diff"
@@ -1352,50 +1284,46 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
         <div className="diff-toolbar pierre-toolbar">
           <span><strong>{files.length}</strong> files changed</span>
           <span className="comment-hint"><MessageSquare size={13} /> Select lines or click <b>+</b> in the gutter to comment</span>
-          {commentCount > 0 && <span className="comment-count">{commentCount} local comment{commentCount === 1 ? "" : "s"}</span>}
-          <button type="button" className="global-reply-button" disabled={pendingReplies.length === 0} onClick={pushPendingReplies} title={pendingReplies.length ? `Push ${pendingReplies.length} draft ${pendingReplies.length === 1 ? "reply" : "replies"}` : "No draft replies"}>
-            <Send size={13} /> Push {pendingReplies.length === 1 ? "reply" : "replies"}{pendingReplies.length > 0 ? ` (${pendingReplies.length})` : ""}
-          </button>
+          {localCommentCount > 0 && <span className="comment-count">{localCommentCount} local comment{localCommentCount === 1 ? "" : "s"}</span>}
           <button type="button" className="publish-review-button" onClick={openPublishDialog}>
             <Terminal size={13} /> Publish review
           </button>
-          <button
-            type="button"
-            className={`whitespace-toggle${showWhitespace ? " active" : ""}`}
-            title={showWhitespace ? "Hide whitespace characters" : "Show spaces and tabs"}
-            aria-label={showWhitespace ? "Hide whitespace characters" : "Show spaces and tabs"}
-            aria-pressed={showWhitespace}
-            onClick={() => setShowWhitespace((current) => { const next = !current; saveProjectUiSettings(data.host, data.project, { showWhitespace: next }); return next; })}
-          >
-            <Pilcrow size={14} />
-            <span>Whitespace</span>
-          </button>
-          <label className="tab-size-setting">
-            <span>Tab size</span>
-            <select
-              aria-label="Tab size"
-              value={tabSize}
-              onChange={(event) => {
-                const nextTabSize = Number(event.target.value);
-                setTabSize(nextTabSize);
-                saveProjectUiSettings(data.host, data.project, { tabSize: nextTabSize });
-              }}
-            >
-              <option value={2}>2</option>
-              <option value={4}>4</option>
-              <option value={8}>8</option>
-            </select>
-          </label>
-          <button
-            type="button"
-            className="diff-style-toggle"
-            title={diffStyle === "split" ? "Switch to unified view" : "Switch to side-by-side view"}
-            aria-label={diffStyle === "split" ? "Switch to unified view" : "Switch to side-by-side view"}
-            onClick={() => setDiffStyle((current) => { const next = current === "split" ? "unified" : "split"; saveProjectUiSettings(data.host, data.project, { diffStyle: next }); return next; })}
-          >
-            {diffStyle === "split" ? <Columns2 size={14} /> : <Rows3 size={14} />}
-            <span>{diffStyle === "split" ? "Side by side" : "Unified"}</span>
-          </button>
+          <details className="view-settings">
+            <summary title="Diff display settings">
+              <Settings2 size={14} />
+              <span>View</span>
+              <ChevronDown className="view-settings-chevron" size={12} />
+            </summary>
+            <div className="view-settings-menu">
+              <div className="view-settings-row view-layout-setting">
+                <span>Layout</span>
+                <div>
+                  <button type="button" className={diffStyle === "split" ? "active" : ""} aria-pressed={diffStyle === "split"} onClick={() => { setDiffStyle("split"); saveProjectUiSettings(data.host, data.project, { diffStyle: "split" }); }}><Columns2 size={13} /> Side by side</button>
+                  <button type="button" className={diffStyle === "unified" ? "active" : ""} aria-pressed={diffStyle === "unified"} onClick={() => { setDiffStyle("unified"); saveProjectUiSettings(data.host, data.project, { diffStyle: "unified" }); }}><Rows3 size={13} /> Unified</button>
+                </div>
+              </div>
+              <label className="view-settings-row">
+                <span><Pilcrow size={13} /> Show whitespace</span>
+                <input type="checkbox" checked={showWhitespace} onChange={(event) => { setShowWhitespace(event.target.checked); saveProjectUiSettings(data.host, data.project, { showWhitespace: event.target.checked }); }} />
+              </label>
+              <label className="view-settings-row">
+                <span>Tab size</span>
+                <select
+                  aria-label="Tab size"
+                  value={tabSize}
+                  onChange={(event) => {
+                    const nextTabSize = Number(event.target.value);
+                    setTabSize(nextTabSize);
+                    saveProjectUiSettings(data.host, data.project, { tabSize: nextTabSize });
+                  }}
+                >
+                  <option value={2}>2 spaces</option>
+                  <option value={4}>4 spaces</option>
+                  <option value={8}>8 spaces</option>
+                </select>
+              </label>
+            </div>
+          </details>
           <span className="summary-add">+{data.insertions}</span>
           <span className="summary-del">−{data.deletions}</span>
         </div>
@@ -1446,23 +1374,21 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
                 <ExistingDiscussion
                   key={thread.id}
                   annotation={annotation}
-                  itemId={`patchset-level:${thread.id}`}
                   expanded
-                  pendingReply={pendingReplies.find((reply) => reply.key === `gerrit:${thread.id}`)}
+                  localReply={localReplies.find((reply) => reply.key === `gerrit:${thread.id}`)}
                   onToggle={() => undefined}
-                  onSaveDraft={savePendingReply}
-                  onDeleteDraft={deletePendingReply}
+                  onSaveReply={saveLocalReply}
+                  onDeleteReply={deleteLocalReply}
                 />
               );
             }) : activeAnnotation && activeItemId ? (
               <ExistingDiscussion
                 annotation={activeAnnotation}
-                itemId={activeItemId}
                 expanded
-                pendingReply={pendingReplies.find((reply) => reply.key === activeThreadKey)}
+                localReply={localReplies.find((reply) => reply.key === activeThreadKey)}
                 onToggle={() => setActiveThreadKey(null)}
-                onSaveDraft={savePendingReply}
-                onDeleteDraft={deletePendingReply}
+                onSaveReply={saveLocalReply}
+                onDeleteReply={deleteLocalReply}
               />
             ) : null}
           </div>
@@ -1487,7 +1413,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
               <div><span>{data.host} · change {data.changeNumber}, patchset {data.revisionNumber}</span><button type="button" onClick={() => void copyGeneratedReview()}><Copy size={13} /> {copied ? "Copied" : "Copy command"}</button></div>
               <pre><code>{generatedReview}</code></pre>
             </div>
-            <p>The command sends Gerrit a <code>ReviewInput</code> JSON document on stdin, including local inline comments and draft replies.</p>
+            <p>The command sends Gerrit a <code>ReviewInput</code> JSON document on stdin, including local inline comments and replies.</p>
           </section>
         </div>
       )}

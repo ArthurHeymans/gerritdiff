@@ -226,10 +226,10 @@ function ExistingDiscussion({ annotation, itemId, onReply }: { annotation: DiffL
     setDraft(null);
   };
   return (
-    <div className="comment-card existing-discussion">
+    <div className={`comment-card existing-discussion ${unresolved ? "thread-unresolved" : "thread-resolved"}`}>
       <div className="existing-thread-head">
         <strong>{metadata.thread.comments.length === 1 ? "Review comment" : `${metadata.thread.comments.length} comment discussion`}</strong>
-        <span className={unresolved ? "unresolved" : "resolved"}>{unresolved ? "Unresolved" : "Resolved"}</span>
+        <span className="thread-state">{unresolved ? "Unresolved" : "Resolved"}</span>
       </div>
       {metadata.thread.comments.map((comment) => (
         <div className={`existing-comment${comment.id.startsWith("local-reply-") ? " local-reply" : ""}`} key={comment.id}>
@@ -258,21 +258,28 @@ function ExistingDiscussion({ annotation, itemId, onReply }: { annotation: DiffL
   );
 }
 
-function DiscussionSidebar({ threads, onSelect }: { threads: DiscussionThread[]; onSelect(thread: DiscussionThread): void }) {
+function DiscussionSidebar({ threads, revisionNumber, onSelect, onPatchsetSelect }: { threads: DiscussionThread[]; revisionNumber: number; onSelect(thread: DiscussionThread): void; onPatchsetSelect(patchset: number): void }) {
   if (!threads.length) return <div className="discussion-empty"><MessageSquare size={20} /><strong>No discussion yet</strong><span>Published Gerrit comments will appear here.</span></div>;
+  const current = threads.filter((thread) => Boolean(threadAnchor(thread, revisionNumber)));
+  const other = threads.filter((thread) => !threadAnchor(thread, revisionNumber));
+  const renderThread = (thread: DiscussionThread, historical: boolean) => {
+    const latest = thread.comments.at(-1);
+    const patchset = latest?.patchSet ?? thread.comments[0]?.patchSet ?? revisionNumber;
+    return (
+      <button key={thread.id} onClick={() => historical ? onPatchsetSelect(patchset) : onSelect(thread)}>
+        <span className="discussion-path">{thread.path === "/PATCHSET_LEVEL" ? "Patchset-level comment" : thread.path}</span>
+        <strong>{thread.comments[0]?.author.name}</strong>
+        <p>{commentSummary(thread.comments[0]?.message ?? "")}</p>
+        <span className="discussion-meta">{thread.comments.length} comment{thread.comments.length === 1 ? "" : "s"} · Patchset {patchset}{latest?.unresolved ? " · Unresolved" : ""}{historical ? " · Open patchset" : ""}</span>
+      </button>
+    );
+  };
   return (
     <div className="discussion-sidebar">
-      {threads.map((thread) => {
-        const latest = thread.comments.at(-1);
-        return (
-          <button key={thread.id} onClick={() => onSelect(thread)}>
-            <span className="discussion-path">{thread.path === "/PATCHSET_LEVEL" ? "Patchset" : thread.path}</span>
-            <strong>{thread.comments[0]?.author.name}</strong>
-            <p>{commentSummary(thread.comments[0]?.message ?? "")}</p>
-            <span className="discussion-meta">{thread.comments.length} comment{thread.comments.length === 1 ? "" : "s"} · Patchset {thread.comments[0]?.patchSet}{latest?.unresolved ? " · Unresolved" : ""}</span>
-          </button>
-        );
-      })}
+      <div className="discussion-group-title"><span>Patchset {revisionNumber}</span><b>{current.length}</b></div>
+      {current.map((thread) => renderThread(thread, false))}
+      {other.length > 0 && <div className="discussion-group-title"><span>Other patchsets</span><b>{other.length}</b></div>}
+      {other.toSorted((a, b) => (b.comments.at(-1)?.patchSet ?? 0) - (a.comments.at(-1)?.patchSet ?? 0)).map((thread) => renderThread(thread, true))}
     </div>
   );
 }
@@ -326,7 +333,7 @@ function ReviewFileTree({
   return <FileTree model={model} className="pierre-tree" />;
 }
 
-export function ChangeReview({ data, theme }: { data: ChangeData; theme: GerritDiffTheme }) {
+export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { data: ChangeData; theme: GerritDiffTheme; onPatchsetChange(patchset: number): void; onBaseChange(base?: number): void }) {
   const viewerRef = useRef<CodeViewHandle<CommentMetadata> | null>(null);
   const activeDraftRef = useRef<ActiveDraft | null>(null);
   const nextCommentRef = useRef(1);
@@ -338,11 +345,27 @@ export function ChangeReview({ data, theme }: { data: ChangeData; theme: GerritD
   const [repositoryError, setRepositoryError] = useState("");
   const [loadingItems, setLoadingItems] = useState<ReadonlySet<string>>(() => new Set());
 
-  const files = useMemo(
-    () => parsePatchFiles(data.patch, `${data.host}-${data.changeNumber}-${data.revisionNumber}`, true).flatMap((parsed) => parsed.files),
-    [data.changeNumber, data.host, data.patch, data.revisionNumber],
-  );
+  const files = useMemo(() => {
+    if (!data.comparisonFiles) return parsePatchFiles(data.patch, `${data.host}-${data.changeNumber}-${data.revisionNumber}`, true).flatMap((parsed) => parsed.files);
+    return data.comparisonFiles.flatMap((file, index) => {
+      if (file.binary) {
+        const oldName = file.previousName ?? file.name;
+        const patch = `diff --git a/${oldName} b/${file.name}\nBinary files a/${oldName} and b/${file.name} differ\n`;
+        return parsePatchFiles(patch, `${data.revision}:compare:${data.baseRevisionNumber}:binary:${index}`, true).flatMap((parsed) => parsed.files);
+      }
+      const fileDiff = parseDiffFromFile(
+        { name: file.previousName ?? file.name, contents: file.baseContent ?? "", cacheKey: `${data.baseRevisionNumber}:${file.previousName ?? file.name}` },
+        { name: file.name, contents: file.targetContent ?? "", cacheKey: `${data.revision}:${file.name}` },
+        undefined,
+        true,
+      );
+      fileDiff.type = file.status === "A" ? "new" : file.status === "D" ? "deleted" : file.status === "R" ? "rename-changed" : file.status === "C" ? "rename-changed" : "change";
+      fileDiff.prevName = file.previousName;
+      return [fileDiff];
+    });
+  }, [data.baseRevisionNumber, data.changeNumber, data.comparisonFiles, data.host, data.patch, data.revision, data.revisionNumber]);
   const [discussionThreads, setDiscussionThreads] = useState(() => buildDiscussionThreads(data.comments));
+  const currentDiscussionCount = discussionThreads.filter((thread) => Boolean(threadAnchor(thread, data.revisionNumber))).length;
   const initialItems = useMemo<CodeViewItem<CommentMetadata>[]>(
     () => files.map((fileDiff, index) => {
       const annotations: DiffLineAnnotation<CommentMetadata>[] = [];
@@ -610,11 +633,11 @@ export function ChangeReview({ data, theme }: { data: ChangeData; theme: GerritD
         <div className="sidebar-tabs">
           <button className={sidebarMode === "changed" ? "active" : ""} onClick={() => setSidebarMode("changed")}>Changed <b>{files.length}</b></button>
           <button className={sidebarMode === "repository" ? "active" : ""} onClick={() => setSidebarMode("repository")}>Repository</button>
-          <button className={sidebarMode === "discussion" ? "active" : ""} onClick={() => setSidebarMode("discussion")}>Discussion <b>{discussionThreads.length}</b></button>
+          <button className={sidebarMode === "discussion" ? "active" : ""} onClick={() => setSidebarMode("discussion")} title={`${currentDiscussionCount} on this patchset, ${discussionThreads.length} total`}>Discussion <b>{currentDiscussionCount}/{discussionThreads.length}</b></button>
         </div>
         {sidebarMode === "changed" && <ReviewFileTree files={files} onSelect={scrollToItem} />}
         {sidebarMode === "repository" && <RepositoryBrowser changedFiles={files} sourceUrl={data.sourceUrl} onOpenFile={openRepositoryFile} />}
-        {sidebarMode === "discussion" && <DiscussionSidebar threads={discussionThreads} onSelect={(thread) => void selectDiscussion(thread)} />}
+        {sidebarMode === "discussion" && <DiscussionSidebar threads={discussionThreads} revisionNumber={data.revisionNumber} onSelect={(thread) => void selectDiscussion(thread)} onPatchsetSelect={onPatchsetChange} />}
         {sidebarMode === "repository" && (
           <form className="known-path-form" onSubmit={(event) => { event.preventDefault(); const path = knownPath.trim().replace(/^\/+/, ""); if (path) void openRepositoryFile(path); }}>
             <input value={knownPath} onChange={(event) => setKnownPath(event.target.value)} placeholder="Open a known path…" />
@@ -640,7 +663,17 @@ export function ChangeReview({ data, theme }: { data: ChangeData; theme: GerritD
             <span>updated {new Intl.DateTimeFormat("en", { dateStyle: "medium" }).format(new Date(data.updated))}</span>
             <span className="separator">•</span>
             <GitBranch size={14} /><code>{data.branch}</code>
-            <span className="patchset">Patchset {data.revisionNumber}</span>
+            <div className="patchset-picker">
+              <span>Patchset</span>
+              <select aria-label="Target patchset" value={data.revisionNumber} onChange={(event) => onPatchsetChange(Number(event.target.value))}>
+                {data.revisions.map((revision) => <option key={revision.revision} value={revision.number}>{revision.number}{revision.number === data.revisions.at(-1)?.number ? " (latest)" : ""}</option>)}
+              </select>
+              <small>against</small>
+              <select aria-label="Base patchset" value={data.baseRevisionNumber ?? "parent"} onChange={(event) => onBaseChange(event.target.value === "parent" ? undefined : Number(event.target.value))}>
+                <option value="parent">Parent</option>
+                {data.revisions.filter((revision) => revision.number !== data.revisionNumber).map((revision) => <option key={revision.revision} value={revision.number}>{revision.number}</option>)}
+              </select>
+            </div>
           </div>
         </div>
         {repositoryError && <div className="repository-error"><X size={13} /> <span>{repositoryError}</span><button onClick={() => setRepositoryError("")} aria-label="Dismiss"><X size={12} /></button></div>}

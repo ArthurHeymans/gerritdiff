@@ -122,8 +122,25 @@ function Landing() {
   );
 }
 
+function patchsetUrl(sourceUrl: string, changeNumber: number, patchset: number) {
+  const url = new URL(sourceUrl);
+  const modern = new RegExp(`(/\\+/${changeNumber})(?:/\\d+)?(?:/.*)?$`);
+  if (modern.test(url.pathname)) url.pathname = url.pathname.replace(modern, `$1/${patchset}`);
+  else {
+    const legacy = new RegExp(`(/c/${changeNumber})(?:/\\d+)?(?:/.*)?$`);
+    url.hash = url.hash.replace(legacy, `$1/${patchset}`);
+  }
+  return url.toString();
+}
+
 function Viewer({ data }: { data: ChangeData }) {
   const theme = useGerritDiffTheme();
+  const openComparison = (patchset: number, base?: number) => {
+    const url = patchsetUrl(data.sourceUrl, data.changeNumber, patchset);
+    const baseQuery = base === undefined ? "" : `&base=${base}`;
+    window.location.assign(`/?url=${encodeURIComponent(url)}${baseQuery}`);
+  };
+  const openPatchset = (patchset: number) => openComparison(patchset, data.baseRevisionNumber === patchset ? undefined : data.baseRevisionNumber);
   return (
     <main className="viewer">
       <header className="viewer-topbar">
@@ -134,18 +151,18 @@ function Viewer({ data }: { data: ChangeData }) {
           <ThemeButton />
         </div>
       </header>
-      <ChangeReview data={data} theme={theme} />
+      <ChangeReview data={data} theme={theme} onPatchsetChange={openPatchset} onBaseChange={(base) => openComparison(data.revisionNumber, base)} />
     </main>
   );
 }
 
-function ChangeLoader({ url }: { url: string }) {
+function ChangeLoader({ url, base }: { url: string; base?: string }) {
   const [data, setData] = useState<ChangeData | null>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch(`/api/change?url=${encodeURIComponent(url)}`, { signal: controller.signal })
+    fetch(`/api/change?url=${encodeURIComponent(url)}${base ? `&base=${encodeURIComponent(base)}` : ""}`, { signal: controller.signal })
       .then(async (response) => {
         const body = await response.json();
         if (!response.ok) throw new Error(body.error ?? "Couldn't load this change.");
@@ -156,7 +173,7 @@ function ChangeLoader({ url }: { url: string }) {
         if (reason.name !== "AbortError") setError(reason.message);
       });
     return () => controller.abort();
-  }, [url]);
+  }, [base, url]);
 
   if (error) return (
     <main className="state-page">
@@ -176,5 +193,6 @@ function ChangeLoader({ url }: { url: string }) {
 export function GerritDiffApp() {
   const searchParams = useSearchParams();
   const url = searchParams.get("url");
-  return url ? <ChangeLoader key={url} url={url} /> : <Landing />;
+  const base = searchParams.get("base") ?? undefined;
+  return url ? <ChangeLoader key={`${url}:${base ?? "parent"}`} url={url} base={base} /> : <Landing />;
 }

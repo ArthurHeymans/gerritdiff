@@ -14,6 +14,15 @@ export type GerritComment = {
   ported?: boolean;
 };
 
+export type ComparisonFile = {
+  name: string;
+  previousName?: string;
+  status: "A" | "D" | "R" | "C" | "M";
+  baseContent?: string;
+  targetContent?: string;
+  binary?: boolean;
+};
+
 export type ChangeData = {
   host: string;
   sourceUrl: string;
@@ -25,6 +34,9 @@ export type ChangeData = {
   owner: { name: string; email?: string; avatarUrl?: string };
   revision: string;
   revisionNumber: number;
+  revisions: { revision: string; number: number; created?: string; uploader?: string }[];
+  baseRevisionNumber?: number;
+  comparisonFiles?: ComparisonFile[];
   updated: string;
   insertions: number;
   deletions: number;

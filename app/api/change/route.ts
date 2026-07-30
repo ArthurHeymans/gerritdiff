@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { parseGerritJson, publicFetch, resolveChange } from "@/lib/gerrit-server";
-import type { ChangeData, GerritComment } from "@/lib/types";
+import type { ChangeData, ComparisonFile, GerritComment } from "@/lib/types";
 
 export const runtime = "nodejs";
 
@@ -19,6 +19,65 @@ type GerritCommentInfo = {
 };
 
 type GerritComments = Record<string, GerritCommentInfo[]>;
+type GerritFileInfo = {
+  status?: "A" | "D" | "R" | "C";
+  old_path?: string;
+  lines_inserted?: number;
+  lines_deleted?: number;
+};
+type GerritFiles = Record<string, GerritFileInfo>;
+
+async function fetchRevisionContent(changePath: string, revision: string | number, path: string) {
+  const response = await publicFetch(`${changePath}/revisions/${encodeURIComponent(revision)}/files/${encodeURIComponent(path)}/content`, "text/plain", true);
+  if (!response) return undefined;
+  const encoded = (await response.text()).trim();
+  if (encoded.length > 16_000_000) throw new Error(`${path} is too large to compare.`);
+  return Buffer.from(encoded, "base64");
+}
+
+async function fetchFileStats(revisionPath: string) {
+  const response = await publicFetch(`${revisionPath}/files`);
+  if (!response) return undefined;
+  const entries = Object.entries(parseGerritJson<GerritFiles>(await response.text())).filter(([path]) => !path.startsWith("/"));
+  return {
+    insertions: entries.reduce((sum, [, info]) => sum + (info.lines_inserted ?? 0), 0),
+    deletions: entries.reduce((sum, [, info]) => sum + (info.lines_deleted ?? 0), 0),
+  };
+}
+
+async function fetchComparison(changePath: string, targetRevision: string, baseRevision: number) {
+  const response = await publicFetch(`${changePath}/revisions/${encodeURIComponent(targetRevision)}/files?base=${encodeURIComponent(baseRevision)}`);
+  if (!response) throw new Error("Comparison not found.");
+  const entries = Object.entries(parseGerritJson<GerritFiles>(await response.text())).filter(([path]) => !path.startsWith("/"));
+  const files: ComparisonFile[] = [];
+  let totalSize = 0;
+  for (let index = 0; index < entries.length; index += 8) {
+    const batch = await Promise.all(entries.slice(index, index + 8).map(async ([path, info]) => {
+      const previousName = info.old_path;
+      const [base, target] = await Promise.all([
+        fetchRevisionContent(changePath, baseRevision, previousName ?? path),
+        fetchRevisionContent(changePath, targetRevision, path),
+      ]);
+      totalSize += (base?.byteLength ?? 0) + (target?.byteLength ?? 0);
+      if (totalSize > 40_000_000) throw new Error("This patchset comparison is too large for the hosted viewer.");
+      const binary = Boolean(base?.subarray(0, 8_000).includes(0) || target?.subarray(0, 8_000).includes(0));
+      return {
+        name: path,
+        previousName,
+        status: info.status ?? "M",
+        baseContent: binary ? undefined : base?.toString("utf8"),
+        targetContent: binary ? undefined : target?.toString("utf8"),
+        binary,
+      } satisfies ComparisonFile;
+    }));
+    files.push(...batch);
+  }
+  return {
+    files,
+    insertions: entries.reduce((sum, [, info]) => sum + (info.lines_inserted ?? 0), 0),
+    deletions: entries.reduce((sum, [, info]) => sum + (info.lines_deleted ?? 0), 0),
+  };
+}
 
 async function fetchOptionalComments(url: string) {
   try {
@@ -67,21 +126,29 @@ function normalizeComments(input: GerritComments, origin: string, ported = false
 export async function GET(request: NextRequest) {
   try {
     const sourceUrl = request.nextUrl.searchParams.get("url");
+    const requestedBase = request.nextUrl.searchParams.get("base");
     if (!sourceUrl) return NextResponse.json({ error: "Missing Gerrit URL." }, { status: 400 });
 
     const { parsed, detail, revision, revisionNumber } = await resolveChange(sourceUrl);
+    const baseRevisionNumber = requestedBase ? Number(requestedBase) : undefined;
+    if (baseRevisionNumber !== undefined && (!Number.isInteger(baseRevisionNumber) || baseRevisionNumber < 1 || baseRevisionNumber === revisionNumber || !Object.values(detail.revisions).some((item) => item._number === baseRevisionNumber))) {
+      return NextResponse.json({ error: "Invalid comparison patchset." }, { status: 400 });
+    }
     const changePath = `${parsed.origin}/changes/${encodeURIComponent(parsed.change)}`;
     const revisionPath = `${changePath}/revisions/${encodeURIComponent(revision)}`;
-    const [patchResponse, commentsResponse, portedCommentsResponse] = await Promise.all([
-      publicFetch(`${revisionPath}/patch`, "text/plain"),
+    const [patchResponse, comparison, fileStats, commentsResponse, portedCommentsResponse] = await Promise.all([
+      baseRevisionNumber === undefined ? publicFetch(`${revisionPath}/patch`, "text/plain") : Promise.resolve(null),
+      baseRevisionNumber === undefined ? Promise.resolve(undefined) : fetchComparison(changePath, revision, baseRevisionNumber),
+      baseRevisionNumber === undefined ? fetchFileStats(revisionPath) : Promise.resolve(undefined),
       fetchOptionalComments(`${changePath}/comments?enable-context=true&context-padding=0`),
       fetchOptionalComments(`${revisionPath}/ported_comments`),
     ]);
-    if (!patchResponse) throw new Error("Patch not found.");
-    const patchBody = await patchResponse.text();
-    const encodedPatch = patchBody.trim();
-    if (encodedPatch.length > 40_000_000) throw new Error("This patch is too large for the hosted viewer.");
-    const patch = Buffer.from(encodedPatch, "base64").toString("utf8");
+    let patch = "";
+    if (patchResponse) {
+      const encodedPatch = (await patchResponse.text()).trim();
+      if (encodedPatch.length > 40_000_000) throw new Error("This patch is too large for the hosted viewer.");
+      patch = Buffer.from(encodedPatch, "base64").toString("utf8");
+    }
 
     const allComments = commentsResponse
       ? normalizeComments(parseGerritJson<GerritComments>(await commentsResponse.text()), parsed.origin)
@@ -112,9 +179,19 @@ export async function GET(request: NextRequest) {
       },
       revision,
       revisionNumber,
+      revisions: Object.entries(detail.revisions)
+        .map(([revisionId, info]) => ({
+          revision: revisionId,
+          number: info._number,
+          created: info.created,
+          uploader: info.uploader?.display_name ?? info.uploader?.name,
+        }))
+        .toSorted((a, b) => a.number - b.number),
+      baseRevisionNumber,
+      comparisonFiles: comparison?.files,
       updated: detail.updated,
-      insertions: detail.insertions ?? 0,
-      deletions: detail.deletions ?? 0,
+      insertions: comparison?.insertions ?? fileStats?.insertions ?? detail.insertions ?? 0,
+      deletions: comparison?.deletions ?? fileStats?.deletions ?? detail.deletions ?? 0,
       patch,
       comments: [...commentsById.values()].toSorted((a, b) => a.updated.localeCompare(b.updated)),
     };

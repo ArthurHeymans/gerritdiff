@@ -36,11 +36,12 @@ type CommentMetadata =
 type ActiveDraft = { itemId: string; key: string };
 type RightPanel = { kind: "relation" } | { kind: "scope"; path: string } | { kind: "discussion"; threadKey: string } | null;
 type LocalReply = { key: string; message: string; resolved: boolean };
-type LocalReviewComment = { key: string; path: string; message: string; range: SelectedLineRange; textRange?: GerritTextRange; inReplyTo?: string; unresolved?: boolean };
+type LocalReviewComment = { key: string; path: string; message: string; range: SelectedLineRange; textRange?: GerritTextRange; gerritLine?: number; gerritRange?: GerritTextRange; parent?: number; inReplyTo?: string; unresolved?: boolean };
 type CodeTextSelection = { itemId: string; range: SelectedLineRange; textRange: GerritTextRange; top: number; left: number };
 type GerritCommentInput = {
   // Omitted for /PATCHSET_LEVEL comments; Gerrit defaults to REVISION.
   side?: "PARENT" | "REVISION";
+  parent?: number;
   line?: number;
   range?: { start_line: number; start_character: number; end_line: number; end_character: number };
   in_reply_to?: string;
@@ -203,11 +204,19 @@ function scopeLabel(path: string) {
 }
 
 function shiftCommitMessageComment(comment: GerritComment, offset: number): GerritComment {
-  const shift = (line: number) => Math.max(1, line + offset);
+  const shiftedLine = comment.line === undefined ? undefined : comment.line + offset;
+  const shiftedRange = comment.range
+    ? { ...comment.range, startLine: comment.range.startLine + offset, endLine: comment.range.endLine + offset }
+    : undefined;
+  const visibleRange = shiftedRange && shiftedRange.startLine > 0 && shiftedRange.endLine > 0 ? shiftedRange : undefined;
   return {
     ...comment,
-    line: comment.line ? shift(comment.line) : comment.line,
-    range: comment.range ? { ...comment.range, startLine: shift(comment.range.startLine), endLine: shift(comment.range.endLine) } : undefined,
+    // The viewer intentionally omits Gerrit's generated header. Header comments
+    // therefore remain panel-only instead of being falsely clamped to message line 1.
+    line: (!comment.range || visibleRange) && shiftedLine !== undefined && shiftedLine > 0 ? shiftedLine : undefined,
+    range: visibleRange,
+    gerritLine: comment.line,
+    gerritRange: comment.range,
   };
 }
 
@@ -298,8 +307,24 @@ function commentInput(comment: LocalReviewComment, file: FileDiffMetadata | unde
     side: side === "deletions" ? "PARENT" : "REVISION",
     message: comment.message,
   };
+  if (comment.parent !== undefined) input.parent = comment.parent;
   if (comment.inReplyTo) input.in_reply_to = comment.inReplyTo;
   if (comment.unresolved !== undefined) input.unresolved = comment.unresolved;
+  // Replies to /COMMIT_MSG comments retain their exact server coordinates,
+  // including comments in the generated header that the viewer does not render.
+  if (comment.gerritRange) {
+    input.range = {
+      start_line: comment.gerritRange.start_line,
+      start_character: comment.gerritRange.start_character,
+      end_line: comment.gerritRange.end_line,
+      end_character: comment.gerritRange.end_character,
+    };
+    return input;
+  }
+  if (comment.gerritLine !== undefined) {
+    input.line = comment.gerritLine;
+    return input;
+  }
   if (comment.textRange) {
     input.range = offset
       ? { ...comment.textRange, start_line: comment.textRange.start_line + offset, end_line: comment.textRange.end_line + offset }
@@ -352,9 +377,11 @@ function commentLocationLabel(comment: LocalReviewComment) {
 
 function reviewCommand(host: string, port: string, user: string, project: string, change: number, patchset: number, input: object, heredoc = "GERRIT_REVIEW") {
   const destination = `${user.trim() || "YOUR_USERNAME"}@${host}`;
-  // --project keeps Gerrit from doing the deprecated (and ambiguous) change-number
-  // lookup across every project; it must precede the CHANGE,PATCHSET argument.
-  return `ssh -p ${shellArg(port.trim() || "29418")} ${shellArg(destination)} gerrit review --project ${shellArg(project)} --json ${change},${patchset} <<'${heredoc}'\n${JSON.stringify(input, null, 2)}\n${heredoc}`;
+  // ssh joins all command arguments into one string before Gerrit parses it. Quote
+  // the complete remote command locally, while retaining quotes around the project
+  // for Gerrit's own command-line splitter (the second parsing layer).
+  const remoteCommand = `gerrit review --project ${shellArg(project)} --json ${change},${patchset}`;
+  return `ssh -p ${shellArg(port.trim() || "29418")} -- ${shellArg(destination)} ${shellArg(remoteCommand)} <<'${heredoc}'\n${JSON.stringify(input, null, 2)}\n${heredoc}`;
 }
 
 function DraftComment({
@@ -715,12 +742,12 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
   const [scopeDraft, setScopeDraft] = useState<{ key: string | null; message: string; resolved: boolean } | null>(null);
   const [publishOpen, setPublishOpen] = useState(false);
   const [sshUser, setSshUser] = useState("");
-  const [sshHost, setSshHost] = useState(data.host);
+  const [sshHost, setSshHost] = useState(data.sshHost);
   const [sshPort, setSshPort] = useState("29418");
   const [reviewMessage, setReviewMessage] = useState("");
   const [codeReview, setCodeReview] = useState("");
   const [copied, setCopied] = useState(false);
-  const commitMessageContent = data.commitMessage.trim();
+  const commitMessageContent = data.commitMessage;
 
   const files = useMemo(() => {
     if (!data.comparisonFiles) return parsePatchFiles(data.patch, `${data.host}-${data.changeNumber}-${data.revisionNumber}`, true).flatMap((parsed) => parsed.files);
@@ -1133,6 +1160,15 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
       path: anchor.path,
       message: reply.message,
       range: commentRange(anchor),
+      textRange: commentTextRange(anchor),
+      gerritLine: anchor.gerritLine,
+      gerritRange: anchor.gerritRange ? {
+        start_line: anchor.gerritRange.startLine,
+        start_character: anchor.gerritRange.startCharacter,
+        end_line: anchor.gerritRange.endLine,
+        end_character: anchor.gerritRange.endCharacter,
+      } : undefined,
+      parent: anchor.parent,
       inReplyTo: latestPublished.id,
       unresolved: !reply.resolved,
     }];
@@ -1195,10 +1231,19 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
     const baseComments: Record<string, GerritCommentInput[]> = {};
     for (const comment of combinedReviewComments) {
       const file = files.find((candidate) => candidate.name === comment.path);
-      const input = commentInput(comment, file, data.commitMessageLineOffset);
-      if (data.baseRevisionNumber !== undefined && input.side === "PARENT") {
+      const side = comment.range.endSide ?? comment.range.side ?? "additions";
+      // Existing/ported threads are being replied to on the target patchset.
+      // Only a newly selected left-side location belongs to the explicit base.
+      const belongsToBasePatchset = data.baseRevisionNumber !== undefined && !comment.inReplyTo && side === "deletions";
+      const lineOffset = belongsToBasePatchset
+        ? data.baseCommitMessageLineOffset ?? data.commitMessageLineOffset
+        : data.commitMessageLineOffset;
+      const input = commentInput(comment, file, lineOffset);
+      if (belongsToBasePatchset) {
         const path = file?.prevName ?? comment.path;
-        baseComments[path] = [...(baseComments[path] ?? []), { ...input, side: "REVISION" }];
+        // This is now a comment on the base patchset itself, not on one of
+        // that commit's parents, so a merge-parent selector must not follow it.
+        baseComments[path] = [...(baseComments[path] ?? []), { ...input, side: "REVISION", parent: undefined }];
         continue;
       }
       comments[comment.path] = [...(comments[comment.path] ?? []), input];
@@ -1207,28 +1252,28 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
     if (reviewMessage.trim()) input.message = reviewMessage.trim();
     if (codeReview) input.labels = { "Code-Review": Number(codeReview) };
     if (Object.keys(comments).length) input.comments = comments;
-    const host = sshHost.trim() || data.host;
+    const host = sshHost.trim() || data.sshHost;
     const command = reviewCommand(host, sshPort, sshUser, data.project, data.changeNumber, data.revisionNumber, input);
     if (!Object.keys(baseComments).length) return command;
     const baseCommand = reviewCommand(host, sshPort, sshUser, data.project, data.changeNumber, data.baseRevisionNumber as number, { comments: baseComments }, "GERRIT_REVIEW_BASE");
     return `${command}\n${baseCommand}`;
-  }, [codeReview, combinedReviewComments, data.baseRevisionNumber, data.changeNumber, data.commitMessageLineOffset, data.host, data.project, data.revisionNumber, files, reviewMessage, sshHost, sshPort, sshUser]);
+  }, [codeReview, combinedReviewComments, data.baseCommitMessageLineOffset, data.baseRevisionNumber, data.changeNumber, data.commitMessageLineOffset, data.project, data.revisionNumber, data.sshHost, files, reviewMessage, sshHost, sshPort, sshUser]);
 
   const copyGeneratedReview = useCallback(async () => {
     await navigator.clipboard.writeText(generatedReview);
     window.localStorage.setItem(`gerritdiff:ssh-user:${data.host}`, sshUser.trim());
-    window.localStorage.setItem(`gerritdiff:ssh-host:${data.host}`, sshHost.trim() || data.host);
+    window.localStorage.setItem(`gerritdiff:ssh-host:${data.host}`, sshHost.trim() || data.sshHost);
     window.localStorage.setItem(`gerritdiff:ssh-port:${data.host}`, sshPort.trim() || "29418");
     setCopied(true);
-  }, [data.host, generatedReview, sshHost, sshPort, sshUser]);
+  }, [data.host, data.sshHost, generatedReview, sshHost, sshPort, sshUser]);
 
   const openPublishDialog = useCallback(() => {
     setSshUser(window.localStorage.getItem(`gerritdiff:ssh-user:${data.host}`) ?? "");
-    setSshHost(window.localStorage.getItem(`gerritdiff:ssh-host:${data.host}`) ?? data.host);
+    setSshHost(window.localStorage.getItem(`gerritdiff:ssh-host:${data.host}`) ?? data.sshHost);
     setSshPort(window.localStorage.getItem(`gerritdiff:ssh-port:${data.host}`) ?? "29418");
     setCopied(false);
     setPublishOpen(true);
-  }, [data.host]);
+  }, [data.host, data.sshHost]);
 
   const renderAnnotation = useCallback((annotation: DiffLineAnnotation<CommentMetadata> | LineAnnotation<CommentMetadata>, item: CodeViewItem<CommentMetadata>) => {
     if (!annotation.metadata) return null;

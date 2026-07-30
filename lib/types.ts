@@ -4,7 +4,12 @@ export type GerritComment = {
   patchSet: number;
   line?: number;
   side: "PARENT" | "REVISION";
+  /** 1-based merge-parent number when side is PARENT; omitted for the auto-merge base. */
+  parent?: number;
   range?: { startLine: number; startCharacter: number; endLine: number; endCharacter: number };
+  /** Original Gerrit coordinates retained when /COMMIT_MSG is shown without its generated header. */
+  gerritLine?: number;
+  gerritRange?: { startLine: number; startCharacter: number; endLine: number; endCharacter: number };
   contextLines?: { lineNumber: number; text: string }[];
   author: { name: string; email?: string; avatarUrl?: string };
   message: string;
@@ -44,7 +49,10 @@ export type GerritReviewer = {
 };
 
 export type ChangeData = {
+  /** Gerrit's HTTP authority, used to scope UI settings and credentials. */
   host: string;
+  /** Gerrit's default SSH hostname, without the HTTP port. */
+  sshHost: string;
   sourceUrl: string;
   changeNumber: number;
   subject: string;
@@ -53,6 +61,8 @@ export type ChangeData = {
   // lines (Parent/Merge Of, Author, AuthorDate, Commit, CommitDate, blank), so
   // comment line numbers on that path are offset by this many lines.
   commitMessageLineOffset: number;
+  /** Equivalent /COMMIT_MSG offset for an explicitly selected base patchset. */
+  baseCommitMessageLineOffset?: number;
   project: string;
   branch: string;
   status: string;

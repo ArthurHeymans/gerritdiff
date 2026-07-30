@@ -9,6 +9,7 @@ type GerritCommentInfo = {
   patch_set: number;
   line?: number;
   side?: "PARENT" | "REVISION";
+  parent?: number;
   range?: { start_line: number; start_character: number; end_line: number; end_character: number };
   context_lines?: { line_number: number; context_line: string }[];
   author?: { name?: string; display_name?: string; email?: string; avatars?: { url: string; height: number }[] };
@@ -112,6 +113,7 @@ function normalizeComments(input: GerritComments, origin: string, ported = false
       patchSet: comment.patch_set,
       line: comment.line,
       side: comment.side ?? "REVISION",
+      parent: comment.parent,
       range: comment.range ? {
         startLine: comment.range.start_line,
         startCharacter: comment.range.start_character,
@@ -141,15 +143,23 @@ export async function GET(request: NextRequest) {
 
     const { parsed, detail, revision, revisionNumber } = await resolveChange(sourceUrl);
     const selectedRevision = Object.values(detail.revisions).find((item) => item._number === revisionNumber);
-    const commitMessage = selectedRevision?.commit?.message?.trim() || detail.subject;
-    const commitSubject = selectedRevision?.commit?.subject?.trim() || commitMessage.split(/\r?\n/, 1)[0] || detail.subject;
+    // Preserve the exact message text: /COMMIT_MSG comment lines are relative to it,
+    // so trimming leading blank lines would move every displayed/published anchor.
+    const commitMessage = selectedRevision?.commit?.message ?? detail.subject;
+    const commitSubject = selectedRevision?.commit?.subject?.trim() || commitMessage.split(/\r?\n/, 1)[0]?.trim() || detail.subject;
     // /COMMIT_MSG header, per Gerrit's MagicFile#forCommitMessage: one line per parent
     // (none for a root commit), Author, AuthorDate, Commit, CommitDate, then a blank line.
     const commitMessageLineOffset = (selectedRevision?.commit?.parents?.length ?? 1) + 5;
     const baseRevisionNumber = requestedBase ? Number(requestedBase) : undefined;
-    if (baseRevisionNumber !== undefined && (!Number.isInteger(baseRevisionNumber) || baseRevisionNumber < 1 || baseRevisionNumber === revisionNumber || !Object.values(detail.revisions).some((item) => item._number === baseRevisionNumber))) {
+    const baseRevision = baseRevisionNumber === undefined
+      ? undefined
+      : Object.values(detail.revisions).find((item) => item._number === baseRevisionNumber);
+    if (baseRevisionNumber !== undefined && (!Number.isInteger(baseRevisionNumber) || baseRevisionNumber < 1 || baseRevisionNumber === revisionNumber || !baseRevision)) {
       return NextResponse.json({ error: "Invalid comparison patchset." }, { status: 400 });
     }
+    const baseCommitMessageLineOffset = baseRevision
+      ? (baseRevision.commit?.parents?.length ?? 1) + 5
+      : undefined;
     const changePath = `${parsed.origin}/changes/${encodeURIComponent(parsed.change)}`;
     const revisionPath = `${changePath}/revisions/${encodeURIComponent(revision)}`;
     const [patchResponse, comparison, fileStats, commentsResponse, portedCommentsResponse, relatedResponse] = await Promise.all([
@@ -255,11 +265,13 @@ export async function GET(request: NextRequest) {
     const avatarUrl = avatar ? new URL(avatar, parsed.origin).toString() : undefined;
     const data: ChangeData = {
       host: parsed.host,
+      sshHost: parsed.sshHost,
       sourceUrl,
       changeNumber: detail._number,
       subject: commitSubject,
       commitMessage,
       commitMessageLineOffset,
+      baseCommitMessageLineOffset,
       project: detail.project,
       branch: detail.branch,
       status: detail.status,

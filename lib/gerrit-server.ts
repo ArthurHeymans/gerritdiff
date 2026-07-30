@@ -3,7 +3,10 @@ import { isIP } from "node:net";
 
 type ParsedGerritUrl = {
   origin: string;
+  /** HTTP authority, including a non-default web port. */
   host: string;
+  /** Hostname only; suitable for the separately ported SSH destination. */
+  sshHost: string;
   change: string;
   revision: string;
 };
@@ -52,7 +55,8 @@ function parseGerritUrl(input: string): ParsedGerritUrl {
   const legacy = fullPath.match(/\/(?:#\/)?c\/(\d+)(?:\/(\d+))?/);
   const match = modern ?? legacy;
   if (!match) throw new Error("That doesn't look like a Gerrit change URL.");
-  return { origin: url.origin, host: url.host, change: match[1], revision: match[2] ?? "current" };
+  const sshHost = url.hostname.replace(/^\[(.*)\]$/, "$1");
+  return { origin: url.origin, host: url.host, sshHost, change: match[1], revision: match[2] ?? "current" };
 }
 
 function isPrivateAddress(address: string): boolean {

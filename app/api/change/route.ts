@@ -130,6 +130,9 @@ export async function GET(request: NextRequest) {
     if (!sourceUrl) return NextResponse.json({ error: "Missing Gerrit URL." }, { status: 400 });
 
     const { parsed, detail, revision, revisionNumber } = await resolveChange(sourceUrl);
+    const selectedRevision = Object.values(detail.revisions).find((item) => item._number === revisionNumber);
+    const commitMessage = selectedRevision?.commit?.message?.trim() || detail.subject;
+    const commitSubject = selectedRevision?.commit?.subject?.trim() || commitMessage.split(/\r?\n/, 1)[0] || detail.subject;
     const baseRevisionNumber = requestedBase ? Number(requestedBase) : undefined;
     if (baseRevisionNumber !== undefined && (!Number.isInteger(baseRevisionNumber) || baseRevisionNumber < 1 || baseRevisionNumber === revisionNumber || !Object.values(detail.revisions).some((item) => item._number === baseRevisionNumber))) {
       return NextResponse.json({ error: "Invalid comparison patchset." }, { status: 400 });
@@ -168,7 +171,8 @@ export async function GET(request: NextRequest) {
       host: parsed.host,
       sourceUrl,
       changeNumber: detail._number,
-      subject: detail.subject,
+      subject: commitSubject,
+      commitMessage,
       project: detail.project,
       branch: detail.branch,
       status: detail.status,

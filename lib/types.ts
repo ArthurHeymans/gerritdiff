@@ -28,6 +28,7 @@ export type ChangeData = {
   sourceUrl: string;
   changeNumber: number;
   subject: string;
+  commitMessage: string;
   project: string;
   branch: string;
   status: string;

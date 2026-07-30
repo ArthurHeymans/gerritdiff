@@ -30,6 +30,7 @@ type CommentMetadata =
   | { kind: "existing"; key: string; range: SelectedLineRange; thread: DiscussionThread };
 
 type ActiveDraft = { itemId: string; key: string };
+type PendingReply = { itemId: string; key: string; message: string; resolved: boolean };
 
 type ContentResponse = {
   exists: boolean;
@@ -213,16 +214,18 @@ function CommentText({ comment }: { comment: GerritComment }) {
   );
 }
 
-function ExistingDiscussion({ annotation, itemId, onReply }: { annotation: DiffLineAnnotation<CommentMetadata>; itemId: string; onReply(itemId: string, key: string, message: string, resolve: boolean): void }) {
+function ExistingDiscussion({ annotation, itemId, pendingReply, onSaveDraft, onDeleteDraft }: { annotation: DiffLineAnnotation<CommentMetadata>; itemId: string; pendingReply?: PendingReply; onSaveDraft(reply: PendingReply): void; onDeleteDraft(key: string): void }) {
   const metadata = annotation.metadata;
-  const [draft, setDraft] = useState<string | null>(null);
+  const [draft, setDraft] = useState<{ message: string; resolved: boolean } | null>(null);
   if (!metadata || metadata.kind !== "existing") return null;
   const latest = metadata.thread.comments.at(-1);
   const unresolved = latest?.unresolved ?? false;
-  const submit = (message: string, resolve = false) => {
-    const trimmed = message.trim();
+  const openDraft = (message = "", resolved = !unresolved) => setDraft({ message, resolved });
+  const saveDraft = () => {
+    if (!draft) return;
+    const trimmed = draft.message.trim();
     if (!trimmed) return;
-    onReply(itemId, metadata.key, trimmed, resolve);
+    onSaveDraft({ itemId, key: metadata.key, message: trimmed, resolved: draft.resolved });
     setDraft(null);
   };
   return (
@@ -242,16 +245,29 @@ function ExistingDiscussion({ annotation, itemId, onReply }: { annotation: DiffL
           </div>
         </div>
       ))}
+      {pendingReply && draft === null && (
+        <div className={`pending-reply ${pendingReply.resolved ? "pending-resolves" : "pending-unresolved"}`}>
+          <div><strong>Draft reply</strong><span className={`pending-resolution ${pendingReply.resolved ? "resolves" : "unresolved"}`}>{pendingReply.resolved ? <CircleCheck size={11} /> : <MessageSquare size={11} />}{pendingReply.resolved ? "Resolves discussion" : "Keeps discussion unresolved"}</span></div>
+          <p>{pendingReply.message}</p>
+          <div><button onClick={() => setDraft({ message: pendingReply.message, resolved: pendingReply.resolved })}>Edit</button><button onClick={() => onDeleteDraft(metadata.key)}>Discard</button></div>
+        </div>
+      )}
       <div className="discussion-actions">
-        <button onClick={() => setDraft("")}><Reply size={12} /> Reply</button>
-        <button onClick={() => setDraft(`${(latest?.message ?? "").split("\n").map((line) => `> ${line}`).join("\n")}\n\n`)}><Quote size={12} /> Quote</button>
-        <button onClick={() => submit("Ack", true)}><Check size={12} /> Ack</button>
-        <button onClick={() => submit("Done", true)}><CircleCheck size={12} /> Done</button>
+        <button onClick={() => openDraft(pendingReply?.message ?? "", pendingReply?.resolved ?? !unresolved)}><Reply size={12} /> Reply</button>
+        <button onClick={() => openDraft(`${(latest?.message ?? "").split("\n").map((line) => `> ${line}`).join("\n")}\n\n`, pendingReply?.resolved ?? !unresolved)}><Quote size={12} /> Quote</button>
+        <button onClick={() => onSaveDraft({ itemId, key: metadata.key, message: "Ack", resolved: true })}><Check size={12} /> Ack</button>
+        <button onClick={() => onSaveDraft({ itemId, key: metadata.key, message: "Done", resolved: true })}><CircleCheck size={12} /> Done</button>
       </div>
       {draft !== null && (
-        <form className="discussion-reply" onSubmit={(event) => { event.preventDefault(); submit(draft); }}>
-          <textarea autoFocus rows={3} value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Write a reply…" />
-          <div><span>Saved locally; Gerrit sign-in is required to publish.</span><button type="button" onClick={() => setDraft(null)}>Cancel</button><button type="submit" disabled={!draft.trim()}>Add reply</button></div>
+        <form className="discussion-reply" onSubmit={(event) => { event.preventDefault(); saveDraft(); }}>
+          <textarea autoFocus rows={3} value={draft.message} onChange={(event) => setDraft((current) => current ? { ...current, message: event.target.value } : current)} placeholder="Write a reply…" />
+          <div className="reply-options">
+            <button className={`resolution-toggle ${draft.resolved ? "is-resolved" : "is-unresolved"}`} type="button" aria-pressed={draft.resolved} onClick={() => setDraft((current) => current ? { ...current, resolved: !current.resolved } : current)}>
+              <CircleCheck size={12} /> {draft.resolved ? "Resolved" : "Unresolved"}
+            </button>
+            <span>Toggle whether this discussion still needs action.</span>
+          </div>
+          <div><span>Save this draft, then push all replies from the toolbar.</span><button type="button" onClick={() => setDraft(null)}>Cancel</button><button type="submit" disabled={!draft.message.trim()}>Save draft</button></div>
         </form>
       )}
     </div>
@@ -266,11 +282,11 @@ function DiscussionSidebar({ threads, revisionNumber, onSelect, onPatchsetSelect
     const latest = thread.comments.at(-1);
     const patchset = latest?.patchSet ?? thread.comments[0]?.patchSet ?? revisionNumber;
     return (
-      <button key={thread.id} onClick={() => historical ? onPatchsetSelect(patchset) : onSelect(thread)}>
+      <button className={latest?.unresolved ? "sidebar-thread-unresolved" : "sidebar-thread-resolved"} key={thread.id} onClick={() => historical ? onPatchsetSelect(patchset) : onSelect(thread)}>
         <span className="discussion-path">{thread.path === "/PATCHSET_LEVEL" ? "Patchset-level comment" : thread.path}</span>
-        <strong>{thread.comments[0]?.author.name}</strong>
+        <span className="discussion-author"><strong>{thread.comments[0]?.author.name}</strong><i>{latest?.unresolved ? "Unresolved" : "Resolved"}</i></span>
         <p>{commentSummary(thread.comments[0]?.message ?? "")}</p>
-        <span className="discussion-meta">{thread.comments.length} comment{thread.comments.length === 1 ? "" : "s"} · Patchset {patchset}{latest?.unresolved ? " · Unresolved" : ""}{historical ? " · Open patchset" : ""}</span>
+        <span className="discussion-meta">{thread.comments.length} comment{thread.comments.length === 1 ? "" : "s"} · Patchset {patchset}{historical ? " · Open patchset" : ""}</span>
       </button>
     );
   };
@@ -344,6 +360,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   const [knownPath, setKnownPath] = useState("");
   const [repositoryError, setRepositoryError] = useState("");
   const [loadingItems, setLoadingItems] = useState<ReadonlySet<string>>(() => new Set());
+  const [pendingReplies, setPendingReplies] = useState<PendingReply[]>([]);
 
   const files = useMemo(() => {
     if (!data.comparisonFiles) return parsePatchFiles(data.patch, `${data.host}-${data.changeNumber}-${data.revisionNumber}`, true).flatMap((parsed) => parsed.files);
@@ -481,7 +498,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     },
   }), [createDraft, diffStyle, theme]);
 
-  const addDiscussionReply = useCallback((itemId: string, key: string, message: string, resolve: boolean) => {
+  const addDiscussionReply = useCallback((itemId: string, key: string, message: string, resolved: boolean) => {
     const timestamp = new Date().toISOString();
     let updatedThread: DiscussionThread | undefined;
     updateDiffItem(itemId, (item) => {
@@ -501,7 +518,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
           author: { name: "You" },
           message,
           updated: timestamp,
-          unresolved: resolve ? false : latest.unresolved,
+          unresolved: !resolved,
           inReplyTo: latest.id,
         };
         updatedThread = { ...metadata.thread, comments: [...metadata.thread.comments, reply] };
@@ -516,13 +533,26 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     }
   }, [data.revisionNumber, updateDiffItem]);
 
+  const savePendingReply = useCallback((reply: PendingReply) => {
+    setPendingReplies((current) => [...current.filter((entry) => entry.key !== reply.key), reply]);
+  }, []);
+
+  const deletePendingReply = useCallback((key: string) => {
+    setPendingReplies((current) => current.filter((entry) => entry.key !== key));
+  }, []);
+
+  const pushPendingReplies = useCallback(() => {
+    for (const reply of pendingReplies) addDiscussionReply(reply.itemId, reply.key, reply.message, reply.resolved);
+    setPendingReplies([]);
+  }, [addDiscussionReply, pendingReplies]);
+
   const renderAnnotation = useCallback((annotation: DiffLineAnnotation<CommentMetadata> | LineAnnotation<CommentMetadata>, item: CodeViewItem<CommentMetadata>) => {
     if (!("side" in annotation) || item.type !== "diff" || !annotation.metadata) return null;
-    if (annotation.metadata.kind === "existing") return <ExistingDiscussion annotation={annotation} itemId={item.id} onReply={addDiscussionReply} />;
+    if (annotation.metadata.kind === "existing") return <ExistingDiscussion annotation={annotation} itemId={item.id} pendingReply={pendingReplies.find((reply) => reply.key === annotation.metadata?.key)} onSaveDraft={savePendingReply} onDeleteDraft={deletePendingReply} />;
     return annotation.metadata.kind === "draft"
       ? <DraftComment annotation={annotation} itemId={item.id} onCancel={removeComment} onSave={saveComment} />
       : <SavedComment annotation={annotation} itemId={item.id} onDelete={removeComment} onSelect={toggleCommentSelection} />;
-  }, [addDiscussionReply, removeComment, saveComment, toggleCommentSelection]);
+  }, [deletePendingReply, pendingReplies, removeComment, saveComment, savePendingReply, toggleCommentSelection]);
 
   const renderHeaderPrefix = useCallback((item: CodeViewItem<CommentMetadata>) => {
     if (item.type !== "diff") return null;
@@ -626,6 +656,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   }, [loadFullDiff, loadingItems]);
 
   const initials = data.owner.name.split(/\s+/).slice(0, 2).map((word) => word[0]).join("").toUpperCase();
+  const commitMessageBody = data.commitMessage.split(/\r?\n/).slice(1).join("\n").trim();
 
   return (
     <div className="review-layout">
@@ -657,6 +688,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
             <span>{data.project}</span><span>/</span><span>change {data.changeNumber}</span>
           </div>
           <h1>{data.subject}</h1>
+          {commitMessageBody && <pre className="commit-message-body">{commitMessageBody}</pre>}
           <div className="change-meta">
             <span className="avatar" style={data.owner.avatarUrl ? { backgroundImage: `url(${data.owner.avatarUrl})` } : undefined}>{data.owner.avatarUrl ? null : initials}</span>
             <strong>{data.owner.name}</strong>
@@ -681,6 +713,9 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
           <span><strong>{files.length}</strong> files changed</span>
           <span className="comment-hint"><MessageSquare size={13} /> Select lines or click <b>+</b> in the gutter to comment</span>
           {commentCount > 0 && <span className="comment-count">{commentCount} local comment{commentCount === 1 ? "" : "s"}</span>}
+          <button type="button" className="global-reply-button" disabled={pendingReplies.length === 0} onClick={pushPendingReplies} title={pendingReplies.length ? `Push ${pendingReplies.length} draft ${pendingReplies.length === 1 ? "reply" : "replies"}` : "No draft replies"}>
+            <Send size={13} /> Push {pendingReplies.length === 1 ? "reply" : "replies"}{pendingReplies.length > 0 ? ` (${pendingReplies.length})` : ""}
+          </button>
           <button
             type="button"
             className="diff-style-toggle"

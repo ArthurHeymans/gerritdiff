@@ -24,14 +24,17 @@ import type { GerritDiffTheme } from "@/lib/theme";
 
 type DiscussionThread = { id: string; path: string; comments: GerritComment[] };
 
+type GerritTextRange = { start_line: number; start_character: number; end_line: number; end_character: number };
+
 type CommentMetadata =
-  | { kind: "draft"; key: string; message: string; range: SelectedLineRange }
-  | { kind: "saved"; key: string; author: string; message: string; range: SelectedLineRange }
-  | { kind: "existing"; key: string; range: SelectedLineRange; thread: DiscussionThread };
+  | { kind: "draft"; key: string; message: string; range: SelectedLineRange; textRange?: GerritTextRange }
+  | { kind: "saved"; key: string; author: string; message: string; range: SelectedLineRange; textRange?: GerritTextRange }
+  | { kind: "existing"; key: string; range: SelectedLineRange; textRange?: GerritTextRange; thread: DiscussionThread };
 
 type ActiveDraft = { itemId: string; key: string };
 type PendingReply = { itemId: string; key: string; message: string; resolved: boolean };
-type LocalReviewComment = { key: string; path: string; message: string; range: SelectedLineRange; inReplyTo?: string; unresolved?: boolean };
+type LocalReviewComment = { key: string; path: string; message: string; range: SelectedLineRange; textRange?: GerritTextRange; inReplyTo?: string; unresolved?: boolean };
+type CodeTextSelection = { itemId: string; range: SelectedLineRange; textRange: GerritTextRange; top: number; left: number };
 type GerritCommentInput = {
   side: "PARENT" | "REVISION";
   line?: number;
@@ -40,6 +43,8 @@ type GerritCommentInput = {
   message: string;
   unresolved?: boolean;
 };
+
+const COMMENT_HIGHLIGHT_NAME = "gerrit-comment-range";
 
 type ContentResponse = {
   exists: boolean;
@@ -101,6 +106,73 @@ function commentRange(comment: GerritComment): SelectedLineRange {
   return { start: comment.range?.startLine ?? comment.line ?? 0, end: comment.range?.endLine ?? comment.line ?? 0, side, endSide: side };
 }
 
+function commentTextRange(comment: GerritComment): GerritTextRange | undefined {
+  return comment.range ? {
+    start_line: comment.range.startLine,
+    start_character: comment.range.startCharacter,
+    end_line: comment.range.endLine,
+    end_character: comment.range.endCharacter,
+  } : undefined;
+}
+
+function lineElementFor(node: Node) {
+  const element = node instanceof Element ? node : node.parentElement;
+  return element?.closest<HTMLElement>("[data-line]");
+}
+
+function selectionSide(line: HTMLElement) {
+  if (line.closest("[data-deletions]")) return "deletions" as const;
+  if (line.closest("[data-additions]")) return "additions" as const;
+  return "additions" as const;
+}
+
+function characterOffset(line: HTMLElement, node: Node, offset: number) {
+  const range = document.createRange();
+  range.selectNodeContents(line);
+  try {
+    range.setEnd(node, offset);
+  } catch {
+    return 0;
+  }
+  return range.toString().length;
+}
+
+function textRangeLabel(range: GerritTextRange) {
+  return range.start_line === range.end_line
+    ? `Line ${range.start_line}, characters ${range.start_character + 1}–${range.end_character}`
+    : `Lines ${range.start_line}:${range.start_character + 1}–${range.end_line}:${range.end_character}`;
+}
+
+function textPosition(line: HTMLElement, character: number) {
+  const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT);
+  let remaining = Math.max(0, character);
+  let last: Text | undefined;
+  while (walker.nextNode()) {
+    const node = walker.currentNode as Text;
+    last = node;
+    if (remaining <= node.data.length) return { node, offset: remaining };
+    remaining -= node.data.length;
+  }
+  return last ? { node: last, offset: last.data.length } : { node: line, offset: 0 };
+}
+
+function highlightedTextRanges(root: ShadowRoot, textRange: GerritTextRange, side: "deletions" | "additions", isDiff: boolean) {
+  const ranges: Range[] = [];
+  for (let lineNumber = textRange.start_line; lineNumber <= textRange.end_line; lineNumber++) {
+    const line = [...root.querySelectorAll<HTMLElement>(`[data-line="${lineNumber}"]`)].find((candidate) => !isDiff || selectionSide(candidate) === side);
+    if (!line) continue;
+    const startCharacter = lineNumber === textRange.start_line ? textRange.start_character : 0;
+    const endCharacter = lineNumber === textRange.end_line ? textRange.end_character : (line.textContent?.length ?? 0);
+    const start = textPosition(line, startCharacter);
+    const end = textPosition(line, endCharacter);
+    const range = document.createRange();
+    range.setStart(start.node, start.offset);
+    range.setEnd(end.node, end.offset);
+    if (!range.collapsed) ranges.push(range);
+  }
+  return ranges;
+}
+
 function commentInput(comment: LocalReviewComment, file?: FileDiffMetadata): GerritCommentInput {
   const side = comment.range.endSide ?? comment.range.side ?? "additions";
   const input: GerritCommentInput = {
@@ -109,6 +181,10 @@ function commentInput(comment: LocalReviewComment, file?: FileDiffMetadata): Ger
   };
   if (comment.inReplyTo) input.in_reply_to = comment.inReplyTo;
   if (comment.unresolved !== undefined) input.unresolved = comment.unresolved;
+  if (comment.textRange) {
+    input.range = comment.textRange;
+    return input;
+  }
   if (comment.range.start === comment.range.end || !file) {
     input.line = comment.range.end;
     return input;
@@ -154,8 +230,9 @@ function DraftComment({
   onCancel(itemId: string, key: string): void;
   onSave(itemId: string, key: string, message: string): void;
 }) {
-  const [message, setMessage] = useState(annotation.metadata?.kind === "draft" ? annotation.metadata.message : "");
-  const key = annotation.metadata?.key ?? "";
+  const metadata = annotation.metadata?.kind === "draft" ? annotation.metadata : undefined;
+  const [message, setMessage] = useState(metadata?.message ?? "");
+  const key = metadata?.key ?? "";
   const trimmed = message.trim();
 
   return (
@@ -168,6 +245,7 @@ function DraftComment({
     >
       <div className="comment-avatar">You</div>
       <div className="comment-compose">
+        {metadata?.textRange && <span className="comment-text-range">{textRangeLabel(metadata.textRange)}</span>}
         <textarea
           autoFocus
           value={message}
@@ -198,15 +276,15 @@ function SavedComment({
   annotation: DiffLineAnnotation<CommentMetadata> | LineAnnotation<CommentMetadata>;
   itemId: string;
   onDelete(itemId: string, key: string): void;
-  onSelect(selection: CodeViewLineSelection): void;
+  onSelect(selection: CodeViewLineSelection | null): void;
 }) {
   const metadata = annotation.metadata;
   if (!metadata || metadata.kind !== "saved") return null;
   return (
-    <div className="comment-card saved-comment" onClick={() => onSelect({ id: itemId, range: metadata.range })}>
+    <div className="comment-card saved-comment" onClick={() => onSelect(metadata.textRange ? null : { id: itemId, range: metadata.range })}>
       <div className="comment-avatar">{metadata.author.slice(0, 2).toUpperCase()}</div>
       <div className="saved-comment-body">
-        <div><strong>{metadata.author}</strong><span>just now</span></div>
+        <div><strong>{metadata.author}</strong><span>just now</span>{metadata.textRange && <span className="comment-text-range">{textRangeLabel(metadata.textRange)}</span>}</div>
         <p>{metadata.message}</p>
       </div>
       <button onClick={(event) => { event.stopPropagation(); onDelete(itemId, metadata.key); }} aria-label="Delete comment"><Trash2 size={14} /></button>
@@ -301,6 +379,7 @@ function ExistingDiscussion({ annotation, itemId, expanded, pendingReply, onTogg
         <span className="existing-thread-heading">
           <span className="existing-thread-path" title={metadata.thread.path}>{metadata.thread.path}</span>
           <strong>{metadata.thread.comments.length === 1 ? "Review comment" : `${metadata.thread.comments.length} comment discussion`}</strong>
+          {metadata.textRange && <span className="comment-text-range">{textRangeLabel(metadata.textRange)}</span>}
         </span>
         <span className="thread-state">{unresolved ? "Unresolved" : "Resolved"}</span>
         <ChevronDown className="expanded-thread-chevron" size={14} />
@@ -422,9 +501,11 @@ function ReviewFileTree({
 
 export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { data: ChangeData; theme: GerritDiffTheme; onPatchsetChange(patchset: number): void; onBaseChange(base?: number): void }) {
   const viewerRef = useRef<CodeViewHandle<CommentMetadata> | null>(null);
+  const codeViewContainerRef = useRef<HTMLDivElement | null>(null);
   const activeDraftRef = useRef<ActiveDraft | null>(null);
   const nextCommentRef = useRef(1);
   const [selectedLines, setSelectedLines] = useState<CodeViewLineSelection | null>(null);
+  const [codeTextSelection, setCodeTextSelection] = useState<CodeTextSelection | null>(null);
   const [commentCount, setCommentCount] = useState(0);
   const [diffStyle, setDiffStyle] = useState<"split" | "unified">("split");
   const [sidebarMode, setSidebarMode] = useState<"changed" | "repository" | "discussion">("changed");
@@ -481,7 +562,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
           annotations.push({
             side: range.side ?? "additions",
             lineNumber: range.end,
-            metadata: { kind: "existing", key: `gerrit:${thread.id}`, range, thread },
+            metadata: { kind: "existing", key: `gerrit:${thread.id}`, range, textRange: commentTextRange(anchor), thread },
           });
         }
         return { id: `file-${index}`, type: "diff" as const, fileDiff, annotations };
@@ -502,6 +583,115 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     mediaQuery.addEventListener("change", handleChange);
     return () => mediaQuery.removeEventListener("change", handleChange);
   }, []);
+
+  const refreshCommentHighlights = useCallback(() => {
+    const registry = (CSS as unknown as { highlights?: { set(name: string, highlight: unknown): void; delete(name: string): void } }).highlights;
+    const HighlightConstructor = (window as unknown as { Highlight?: new (...ranges: Range[]) => unknown }).Highlight;
+    if (!registry || !HighlightConstructor) return;
+    const ranges: Range[] = [];
+    for (const rendered of viewerRef.current?.getInstance()?.getRenderedItems() ?? []) {
+      const root = rendered.element.shadowRoot;
+      if (!root) continue;
+      for (const annotation of rendered.item.annotations ?? []) {
+        const metadata = annotation.metadata;
+        if (!metadata?.textRange) continue;
+        const side = metadata.range.endSide ?? metadata.range.side ?? "additions";
+        ranges.push(...highlightedTextRanges(root, metadata.textRange, side, rendered.type === "diff"));
+      }
+    }
+    if (ranges.length) registry.set(COMMENT_HIGHLIGHT_NAME, new HighlightConstructor(...ranges));
+    else registry.delete(COMMENT_HIGHLIGHT_NAME);
+  }, []);
+
+  const captureCodeTextSelection = useCallback(() => {
+    const renderedItems = viewerRef.current?.getInstance()?.getRenderedItems() ?? [];
+    for (const rendered of renderedItems) {
+      const root = rendered.element.shadowRoot;
+      if (!root) continue;
+      const shadowSelection = (root as ShadowRoot & { getSelection?(): Selection | null }).getSelection?.();
+      const selections = [shadowSelection, document.getSelection()];
+      for (const selection of selections) {
+        if (!selection || selection.isCollapsed || selection.rangeCount === 0 || !selection.anchorNode || !selection.focusNode) continue;
+        if (!root.contains(selection.anchorNode) || !root.contains(selection.focusNode)) continue;
+        const domRange = selection.getRangeAt(0);
+        const startLine = lineElementFor(domRange.startContainer);
+        const endLine = lineElementFor(domRange.endContainer);
+        if (!startLine || !endLine) continue;
+        const side = rendered.type === "diff" ? selectionSide(startLine) : "additions";
+        const endSide = rendered.type === "diff" ? selectionSide(endLine) : "additions";
+        if (side !== endSide) continue;
+        const start = Number(startLine.dataset.line);
+        const end = Number(endLine.dataset.line);
+        if (!Number.isFinite(start) || !Number.isFinite(end) || start <= 0 || end <= 0) continue;
+        const startCharacter = characterOffset(startLine, domRange.startContainer, domRange.startOffset);
+        const endCharacter = characterOffset(endLine, domRange.endContainer, domRange.endOffset);
+        if (start === end && startCharacter === endCharacter) continue;
+        const rect = domRange.getBoundingClientRect();
+        const range = { start, end, side, endSide } satisfies SelectedLineRange;
+        setCodeTextSelection({
+          itemId: rendered.id,
+          range,
+          textRange: {
+            start_line: start,
+            start_character: startCharacter,
+            end_line: end,
+            end_character: endCharacter,
+          },
+          top: Math.max(8, rect.top - 38),
+          left: Math.min(window.innerWidth - 120, Math.max(8, rect.left + rect.width / 2 - 54)),
+        });
+        return;
+      }
+    }
+    setCodeTextSelection(null);
+  }, []);
+
+  useEffect(() => {
+    const container = codeViewContainerRef.current;
+    if (!container) return;
+    const handlePointerUp = () => window.setTimeout(captureCodeTextSelection, 0);
+    const clearTextSelection = () => setCodeTextSelection(null);
+    container.addEventListener("pointerup", handlePointerUp);
+    container.addEventListener("scroll", clearTextSelection, { passive: true });
+    return () => {
+      container.removeEventListener("pointerup", handlePointerUp);
+      container.removeEventListener("scroll", clearTextSelection);
+    };
+  }, [captureCodeTextSelection]);
+
+  useEffect(() => {
+    const container = codeViewContainerRef.current;
+    if (!container) return;
+    let frame = requestAnimationFrame(refreshCommentHighlights);
+    const observedRoots = new WeakSet<ShadowRoot>();
+    const shadowObservers: MutationObserver[] = [];
+    const scheduleRefresh = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(refreshCommentHighlights);
+    };
+    const observeShadowRoots = () => {
+      for (const host of container.querySelectorAll<HTMLElement>("diffs-container")) {
+        const root = host.shadowRoot;
+        if (!root || observedRoots.has(root)) continue;
+        observedRoots.add(root);
+        const observer = new MutationObserver(scheduleRefresh);
+        observer.observe(root, { childList: true, subtree: true, characterData: true });
+        shadowObservers.push(observer);
+      }
+    };
+    const containerObserver = new MutationObserver(() => {
+      observeShadowRoots();
+      scheduleRefresh();
+    });
+    containerObserver.observe(container, { childList: true, subtree: true });
+    observeShadowRoots();
+    return () => {
+      containerObserver.disconnect();
+      for (const observer of shadowObservers) observer.disconnect();
+      cancelAnimationFrame(frame);
+      (CSS as unknown as { highlights?: { delete(name: string): void } }).highlights?.delete(COMMENT_HIGHLIGHT_NAME);
+    };
+  }, [refreshCommentHighlights]);
 
   const updateDiffItem = useCallback((itemId: string, update: (item: CodeViewDiffItem<CommentMetadata>) => boolean) => {
     const viewer = viewerRef.current;
@@ -566,7 +756,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
       if (saved?.kind === "saved") {
         setLocalReviewComments((comments) => [
           ...comments.filter((comment) => comment.key !== key),
-          { key, path: updated.type === "diff" ? updated.fileDiff.name : updated.id === "commit-message" ? "/COMMIT_MSG" : updated.file.name, message, range: saved.range },
+          { key, path: updated.type === "diff" ? updated.fileDiff.name : updated.id === "commit-message" ? "/COMMIT_MSG" : updated.file.name, message, range: saved.range, textRange: saved.textRange },
         ]);
       }
       activeDraftRef.current = null;
@@ -575,7 +765,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     }
   }, [updateCommentItem]);
 
-  const createDraft = useCallback((range: SelectedLineRange, itemId: string) => {
+  const createDraft = useCallback((range: SelectedLineRange, itemId: string, textRange?: GerritTextRange) => {
     const item = viewerRef.current?.getItem(itemId);
     const side = range.endSide ?? range.side ?? (item?.type === "file" ? "additions" : undefined);
     if (!side) return;
@@ -587,26 +777,34 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
         const annotation: DiffLineAnnotation<CommentMetadata> = {
           side,
           lineNumber: range.end,
-          metadata: { kind: "draft", key, message: "", range },
+          metadata: { kind: "draft", key, message: "", range, textRange },
         };
         item.annotations = [...(item.annotations ?? []).filter((entry) => entry.metadata?.kind !== "draft"), annotation];
       } else {
         const annotation: LineAnnotation<CommentMetadata> = {
           lineNumber: range.end,
-          metadata: { kind: "draft", key, message: "", range: { ...range, side: "additions", endSide: "additions" } },
+          metadata: { kind: "draft", key, message: "", range: { ...range, side: "additions", endSide: "additions" }, textRange },
         };
         item.annotations = [...(item.annotations ?? []).filter((entry) => entry.metadata?.kind !== "draft"), annotation];
       }
       return true;
     });
-    if (updated) activeDraftRef.current = { itemId, key };
+    if (updated) {
+      activeDraftRef.current = { itemId, key };
+      if (textRange) setSelectedLines(null);
+      setCodeTextSelection(null);
+    }
   }, [removeComment, updateCommentItem]);
 
   const toggleCollapsed = useCallback((itemId: string) => {
     updateDiffItem(itemId, (item) => { item.collapsed = !item.collapsed; return true; });
   }, [updateDiffItem]);
 
-  const toggleCommentSelection = useCallback((selection: CodeViewLineSelection) => {
+  const toggleCommentSelection = useCallback((selection: CodeViewLineSelection | null) => {
+    if (!selection) {
+      setSelectedLines(null);
+      return;
+    }
     setSelectedLines((current) => current?.id === selection.id && areSelectionsEqual(current.range, selection.range) ? null : selection);
   }, []);
 
@@ -623,6 +821,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     enableGutterUtility: true,
     stickyHeaders: true,
     hunkSeparators: "line-info-basic",
+    unsafeCSS: `::highlight(${COMMENT_HIGHLIGHT_NAME}) { background-color: rgba(231, 177, 54, .38); text-decoration: underline 1px rgba(245, 198, 83, .9); text-underline-offset: 2px; }`,
     onGutterUtilityClick(range, context) {
       createDraft(range, context.item.id);
     },
@@ -797,7 +996,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     }
     await loadFullDiff(itemId);
     const range = commentRange(anchor);
-    setSelectedLines({ id: itemId, range });
+    setSelectedLines(anchor.range ? null : { id: itemId, range });
     viewerRef.current?.scrollTo({ type: "range", id: itemId, range, align: "center", behavior: "smooth" });
   }, [data.revisionNumber, loadFullDiff, pathToChangedId, scrollToItem]);
 
@@ -853,7 +1052,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   const activeAnnotation: DiffLineAnnotation<CommentMetadata> | undefined = activeThread && activeRange ? {
     side: activeRange.side ?? "additions",
     lineNumber: activeRange.end,
-    metadata: { kind: "existing", key: `gerrit:${activeThread.id}`, range: activeRange, thread: activeThread },
+    metadata: { kind: "existing", key: `gerrit:${activeThread.id}`, range: activeRange, textRange: activeAnchor ? commentTextRange(activeAnchor) : undefined, thread: activeThread },
   } : undefined;
 
   return (
@@ -936,6 +1135,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
         </div>
         <CodeView<CommentMetadata>
           ref={viewerRef}
+          containerRef={codeViewContainerRef}
           initialItems={initialItems}
           className="pierre-code-view"
           options={options}
@@ -945,6 +1145,17 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
           renderHeaderPrefix={renderHeaderPrefix}
           renderHeaderMetadata={renderHeaderMetadata}
         />
+        {codeTextSelection && (
+          <button
+            type="button"
+            className="text-selection-comment"
+            style={{ top: codeTextSelection.top, left: codeTextSelection.left }}
+            onPointerDown={(event) => event.preventDefault()}
+            onClick={() => createDraft(codeTextSelection.range, codeTextSelection.itemId, codeTextSelection.textRange)}
+          >
+            <MessageSquare size={13} /> Comment
+          </button>
+        )}
       </section>
 
       {activeAnnotation && activeItemId && (

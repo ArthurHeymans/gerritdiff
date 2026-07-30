@@ -16,7 +16,7 @@ import {
 import { CodeView, type CodeViewHandle } from "@pierre/diffs/react";
 import type { GitStatus, GitStatusEntry } from "@pierre/trees";
 import { FileTree, useFileTree } from "@pierre/trees/react";
-import { Check, ChevronDown, CircleCheck, Columns2, FileText, GitBranch, LoaderCircle, MessageSquare, PanelLeftClose, PanelLeftOpen, Quote, Reply, Rows3, Send, Trash2, X } from "lucide-react";
+import { Check, ChevronDown, CircleCheck, Columns2, Copy, FileText, GitBranch, LoaderCircle, MessageSquare, PanelLeftClose, PanelLeftOpen, Quote, Reply, Rows3, Send, Terminal, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RepositoryBrowser } from "@/components/repository-browser";
 import type { ChangeData, GerritComment } from "@/lib/types";
@@ -31,6 +31,15 @@ type CommentMetadata =
 
 type ActiveDraft = { itemId: string; key: string };
 type PendingReply = { itemId: string; key: string; message: string; resolved: boolean };
+type LocalReviewComment = { key: string; path: string; message: string; range: SelectedLineRange; inReplyTo?: string; unresolved?: boolean };
+type GerritCommentInput = {
+  side: "PARENT" | "REVISION";
+  line?: number;
+  range?: { start_line: number; start_character: number; end_line: number; end_character: number };
+  in_reply_to?: string;
+  message: string;
+  unresolved?: boolean;
+};
 
 type ContentResponse = {
   exists: boolean;
@@ -92,13 +101,55 @@ function commentRange(comment: GerritComment): SelectedLineRange {
   return { start: comment.range?.startLine ?? comment.line ?? 0, end: comment.range?.endLine ?? comment.line ?? 0, side, endSide: side };
 }
 
+function commentInput(comment: LocalReviewComment, file?: FileDiffMetadata): GerritCommentInput {
+  const side = comment.range.endSide ?? comment.range.side ?? "additions";
+  const input: GerritCommentInput = {
+    side: side === "deletions" ? "PARENT" : "REVISION",
+    message: comment.message,
+  };
+  if (comment.inReplyTo) input.in_reply_to = comment.inReplyTo;
+  if (comment.unresolved !== undefined) input.unresolved = comment.unresolved;
+  if (comment.range.start === comment.range.end || !file) {
+    input.line = comment.range.end;
+    return input;
+  }
+  const hunk = file.hunks.find((candidate) => {
+    const start = side === "deletions" ? candidate.deletionStart : candidate.additionStart;
+    const count = side === "deletions" ? candidate.deletionCount : candidate.additionCount;
+    return comment.range.end >= start && comment.range.end < start + count;
+  });
+  const start = hunk ? (side === "deletions" ? hunk.deletionStart : hunk.additionStart) : 0;
+  const lineIndex = hunk ? (side === "deletions" ? hunk.deletionLineIndex : hunk.additionLineIndex) + comment.range.end - start : -1;
+  const lineText = side === "deletions" ? file.deletionLines[lineIndex] : file.additionLines[lineIndex];
+  if (lineText === undefined) {
+    input.line = comment.range.end;
+    return input;
+  }
+  input.range = {
+    start_line: comment.range.start,
+    start_character: 0,
+    end_line: comment.range.end,
+    end_character: lineText.length,
+  };
+  return input;
+}
+
+function shellArg(value: string) {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function reviewCommand(host: string, port: string, user: string, change: number, patchset: number, input: object) {
+  const destination = `${user.trim() || "YOUR_USERNAME"}@${host}`;
+  return `ssh -p ${shellArg(port.trim() || "29418")} ${shellArg(destination)} gerrit review --json ${change},${patchset} <<'GERRIT_REVIEW'\n${JSON.stringify(input, null, 2)}\nGERRIT_REVIEW`;
+}
+
 function DraftComment({
   annotation,
   itemId,
   onCancel,
   onSave,
 }: {
-  annotation: DiffLineAnnotation<CommentMetadata>;
+  annotation: DiffLineAnnotation<CommentMetadata> | LineAnnotation<CommentMetadata>;
   itemId: string;
   onCancel(itemId: string, key: string): void;
   onSave(itemId: string, key: string, message: string): void;
@@ -144,7 +195,7 @@ function SavedComment({
   onDelete,
   onSelect,
 }: {
-  annotation: DiffLineAnnotation<CommentMetadata>;
+  annotation: DiffLineAnnotation<CommentMetadata> | LineAnnotation<CommentMetadata>;
   itemId: string;
   onDelete(itemId: string, key: string): void;
   onSelect(selection: CodeViewLineSelection): void;
@@ -382,8 +433,16 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   const [repositoryError, setRepositoryError] = useState("");
   const [loadingItems, setLoadingItems] = useState<ReadonlySet<string>>(() => new Set());
   const [pendingReplies, setPendingReplies] = useState<PendingReply[]>([]);
+  const [localReviewComments, setLocalReviewComments] = useState<LocalReviewComment[]>([]);
   const [activeThreadKey, setActiveThreadKey] = useState<string | null>(null);
-  const commitMessageBody = data.commitMessage.split(/\r?\n/).slice(1).join("\n").trim();
+  const [publishOpen, setPublishOpen] = useState(false);
+  const [sshUser, setSshUser] = useState("");
+  const [sshHost, setSshHost] = useState(data.host);
+  const [sshPort, setSshPort] = useState("29418");
+  const [reviewMessage, setReviewMessage] = useState("");
+  const [codeReview, setCodeReview] = useState("");
+  const [copied, setCopied] = useState(false);
+  const commitMessageContent = data.commitMessage.trim();
 
   const files = useMemo(() => {
     if (!data.comparisonFiles) return parsePatchFiles(data.patch, `${data.host}-${data.changeNumber}-${data.revisionNumber}`, true).flatMap((parsed) => parsed.files);
@@ -408,10 +467,10 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   const currentDiscussionCount = discussionThreads.filter((thread) => Boolean(threadAnchor(thread, data.revisionNumber))).length;
   const initialItems = useMemo<CodeViewItem<CommentMetadata>[]>(
     () => [
-      ...(commitMessageBody ? [{
+      ...(commitMessageContent ? [{
         id: "commit-message",
         type: "file" as const,
-        file: { name: "Commit message", contents: commitMessageBody, cacheKey: `${data.revision}:commit-message` },
+        file: { name: "Commit message", contents: commitMessageContent, cacheKey: `${data.revision}:commit-message` },
       }] : []),
       ...files.map((fileDiff, index) => {
         const annotations: DiffLineAnnotation<CommentMetadata>[] = [];
@@ -428,7 +487,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
         return { id: `file-${index}`, type: "diff" as const, fileDiff, annotations };
       }),
     ],
-    [commitMessageBody, data.revision, data.revisionNumber, discussionThreads, files],
+    [commitMessageContent, data.revision, data.revisionNumber, discussionThreads, files],
   );
   const pathToChangedId = useMemo(
     () => new Map(files.map((file, index) => [file.name, `file-${index}`])),
@@ -452,55 +511,96 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     return viewer.updateItem(item) ? item : undefined;
   }, []);
 
+  const updateCommentItem = useCallback((itemId: string, update: (item: CodeViewItem<CommentMetadata>) => boolean) => {
+    const viewer = viewerRef.current;
+    const item = viewer?.getItem(itemId);
+    if (!viewer || !item || !update(item)) return undefined;
+    item.version = nextVersion(item);
+    return viewer.updateItem(item) ? item : undefined;
+  }, []);
+
   const removeComment = useCallback((itemId: string, key: string) => {
     let removedSaved = false;
-    updateDiffItem(itemId, (item) => {
+    updateCommentItem(itemId, (item) => {
       const target = item.annotations?.find((annotation) => annotation.metadata?.key === key);
       removedSaved = target?.metadata?.kind === "saved";
-      const annotations = item.annotations?.filter((annotation) => annotation.metadata?.key !== key) ?? [];
-      if (annotations.length === (item.annotations?.length ?? 0)) return false;
-      item.annotations = annotations;
+      if (item.type === "diff") {
+        const annotations = item.annotations?.filter((annotation) => annotation.metadata?.key !== key) ?? [];
+        if (annotations.length === (item.annotations?.length ?? 0)) return false;
+        item.annotations = annotations;
+      } else {
+        const annotations = item.annotations?.filter((annotation) => annotation.metadata?.key !== key) ?? [];
+        if (annotations.length === (item.annotations?.length ?? 0)) return false;
+        item.annotations = annotations;
+      }
       return true;
     });
-    if (removedSaved) setCommentCount((count) => Math.max(0, count - 1));
+    if (removedSaved) {
+      setCommentCount((count) => Math.max(0, count - 1));
+      setLocalReviewComments((comments) => comments.filter((comment) => comment.key !== key));
+    }
     if (activeDraftRef.current?.key === key) activeDraftRef.current = null;
     setSelectedLines(null);
-  }, [updateDiffItem]);
+  }, [updateCommentItem]);
 
   const saveComment = useCallback((itemId: string, key: string, message: string) => {
-    const updated = updateDiffItem(itemId, (item) => {
+    const updated = updateCommentItem(itemId, (item) => {
       if (!item.annotations) return false;
-      item.annotations = item.annotations.map((annotation) =>
-        annotation.metadata?.key === key
-          ? { ...annotation, metadata: { ...annotation.metadata, kind: "saved" as const, author: "You", message } }
-          : annotation,
-      );
+      if (item.type === "diff") {
+        item.annotations = item.annotations.map((annotation) =>
+          annotation.metadata?.key === key
+            ? { ...annotation, metadata: { ...annotation.metadata, kind: "saved" as const, author: "You", message } }
+            : annotation,
+        );
+      } else {
+        item.annotations = item.annotations.map((annotation) =>
+          annotation.metadata?.key === key
+            ? { ...annotation, metadata: { ...annotation.metadata, kind: "saved" as const, author: "You", message } }
+            : annotation,
+        );
+      }
       return true;
     });
     if (updated) {
+      const saved = updated.annotations?.find((annotation) => annotation.metadata?.key === key)?.metadata;
+      if (saved?.kind === "saved") {
+        setLocalReviewComments((comments) => [
+          ...comments.filter((comment) => comment.key !== key),
+          { key, path: updated.type === "diff" ? updated.fileDiff.name : updated.id === "commit-message" ? "/COMMIT_MSG" : updated.file.name, message, range: saved.range },
+        ]);
+      }
       activeDraftRef.current = null;
       setCommentCount((count) => count + 1);
       setSelectedLines(null);
     }
-  }, [updateDiffItem]);
+  }, [updateCommentItem]);
 
   const createDraft = useCallback((range: SelectedLineRange, itemId: string) => {
-    const side = range.endSide ?? range.side;
+    const item = viewerRef.current?.getItem(itemId);
+    const side = range.endSide ?? range.side ?? (item?.type === "file" ? "additions" : undefined);
     if (!side) return;
     const key = `draft-${nextCommentRef.current++}`;
     const previous = activeDraftRef.current;
     if (previous && previous.itemId !== itemId) removeComment(previous.itemId, previous.key);
-    const annotation: DiffLineAnnotation<CommentMetadata> = {
-      side,
-      lineNumber: range.end,
-      metadata: { kind: "draft", key, message: "", range },
-    };
-    const updated = updateDiffItem(itemId, (item) => {
-      item.annotations = [...(item.annotations ?? []).filter((entry) => entry.metadata?.kind !== "draft"), annotation];
+    const updated = updateCommentItem(itemId, (item) => {
+      if (item.type === "diff") {
+        const annotation: DiffLineAnnotation<CommentMetadata> = {
+          side,
+          lineNumber: range.end,
+          metadata: { kind: "draft", key, message: "", range },
+        };
+        item.annotations = [...(item.annotations ?? []).filter((entry) => entry.metadata?.kind !== "draft"), annotation];
+      } else {
+        const annotation: LineAnnotation<CommentMetadata> = {
+          lineNumber: range.end,
+          metadata: { kind: "draft", key, message: "", range: { ...range, side: "additions", endSide: "additions" } },
+        };
+        item.annotations = [...(item.annotations ?? []).filter((entry) => entry.metadata?.kind !== "draft"), annotation];
+      }
       return true;
     });
     if (updated) activeDraftRef.current = { itemId, key };
-  }, [removeComment, updateDiffItem]);
+  }, [removeComment, updateCommentItem]);
 
   const toggleCollapsed = useCallback((itemId: string) => {
     updateDiffItem(itemId, (item) => { item.collapsed = !item.collapsed; return true; });
@@ -524,7 +624,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     stickyHeaders: true,
     hunkSeparators: "line-info-basic",
     onGutterUtilityClick(range, context) {
-      if (context.item.type === "diff") createDraft(range, context.item.id);
+      createDraft(range, context.item.id);
     },
   }), [createDraft, diffStyle, theme]);
 
@@ -575,14 +675,69 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     setActiveThreadKey((current) => current === key ? null : key);
   }, []);
 
+  const pendingReplyComments = useMemo<LocalReviewComment[]>(() => pendingReplies.flatMap((reply) => {
+    const thread = discussionThreads.find((candidate) => `gerrit:${candidate.id}` === reply.key);
+    const anchor = thread ? threadAnchor(thread, data.revisionNumber) ?? thread.comments[0] : undefined;
+    const latestPublished = thread?.comments.findLast((comment) => !comment.id.startsWith("local-reply-"));
+    if (!anchor || !latestPublished) return [];
+    return [{
+      key: reply.key,
+      path: anchor.path,
+      message: reply.message,
+      range: commentRange(anchor),
+      inReplyTo: latestPublished.id,
+      unresolved: !reply.resolved,
+    }];
+  }), [data.revisionNumber, discussionThreads, pendingReplies]);
+
   const pushPendingReplies = useCallback(() => {
+    setLocalReviewComments((comments) => [
+      ...comments.filter((comment) => !pendingReplyComments.some((reply) => reply.key === comment.key)),
+      ...pendingReplyComments,
+    ]);
     for (const reply of pendingReplies) addDiscussionReply(reply.itemId, reply.key, reply.message, reply.resolved);
     setPendingReplies([]);
-  }, [addDiscussionReply, pendingReplies]);
+  }, [addDiscussionReply, pendingReplies, pendingReplyComments]);
+
+  const generatedReview = useMemo(() => {
+    const comments: Record<string, GerritCommentInput[]> = {};
+    const combined = [
+      ...localReviewComments.filter((comment) => !pendingReplyComments.some((reply) => reply.key === comment.key)),
+      ...pendingReplyComments,
+    ];
+    for (const comment of combined) {
+      const file = files.find((candidate) => candidate.name === comment.path);
+      comments[comment.path] = [...(comments[comment.path] ?? []), commentInput(comment, file)];
+    }
+    const input: { message?: string; labels?: Record<string, number>; comments?: Record<string, GerritCommentInput[]> } = {};
+    if (reviewMessage.trim()) input.message = reviewMessage.trim();
+    if (codeReview) input.labels = { "Code-Review": Number(codeReview) };
+    if (Object.keys(comments).length) input.comments = comments;
+    return reviewCommand(sshHost.trim() || data.host, sshPort, sshUser, data.changeNumber, data.revisionNumber, input);
+  }, [codeReview, data.changeNumber, data.host, data.revisionNumber, files, localReviewComments, pendingReplyComments, reviewMessage, sshHost, sshPort, sshUser]);
+
+  const copyGeneratedReview = useCallback(async () => {
+    await navigator.clipboard.writeText(generatedReview);
+    window.localStorage.setItem(`gerritdiff:ssh-user:${data.host}`, sshUser.trim());
+    window.localStorage.setItem(`gerritdiff:ssh-host:${data.host}`, sshHost.trim() || data.host);
+    window.localStorage.setItem(`gerritdiff:ssh-port:${data.host}`, sshPort.trim() || "29418");
+    setCopied(true);
+  }, [data.host, generatedReview, sshHost, sshPort, sshUser]);
+
+  const openPublishDialog = useCallback(() => {
+    setSshUser(window.localStorage.getItem(`gerritdiff:ssh-user:${data.host}`) ?? "");
+    setSshHost(window.localStorage.getItem(`gerritdiff:ssh-host:${data.host}`) ?? data.host);
+    setSshPort(window.localStorage.getItem(`gerritdiff:ssh-port:${data.host}`) ?? "29418");
+    setCopied(false);
+    setPublishOpen(true);
+  }, [data.host]);
 
   const renderAnnotation = useCallback((annotation: DiffLineAnnotation<CommentMetadata> | LineAnnotation<CommentMetadata>, item: CodeViewItem<CommentMetadata>) => {
-    if (!("side" in annotation) || item.type !== "diff" || !annotation.metadata) return null;
-    if (annotation.metadata.kind === "existing") return <ExistingDiscussion annotation={annotation} itemId={item.id} expanded={false} pendingReply={pendingReplies.find((reply) => reply.key === annotation.metadata?.key)} onToggle={toggleActiveDiscussion} onSaveDraft={savePendingReply} onDeleteDraft={deletePendingReply} />;
+    if (!annotation.metadata) return null;
+    if (annotation.metadata.kind === "existing") {
+      if (!("side" in annotation) || item.type !== "diff") return null;
+      return <ExistingDiscussion annotation={annotation} itemId={item.id} expanded={false} pendingReply={pendingReplies.find((reply) => reply.key === annotation.metadata?.key)} onToggle={toggleActiveDiscussion} onSaveDraft={savePendingReply} onDeleteDraft={deletePendingReply} />;
+    }
     return annotation.metadata.kind === "draft"
       ? <DraftComment annotation={annotation} itemId={item.id} onCancel={removeComment} onSave={saveComment} />
       : <SavedComment annotation={annotation} itemId={item.id} onDelete={removeComment} onSelect={toggleCommentSelection} />;
@@ -763,6 +918,9 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
           <button type="button" className="global-reply-button" disabled={pendingReplies.length === 0} onClick={pushPendingReplies} title={pendingReplies.length ? `Push ${pendingReplies.length} draft ${pendingReplies.length === 1 ? "reply" : "replies"}` : "No draft replies"}>
             <Send size={13} /> Push {pendingReplies.length === 1 ? "reply" : "replies"}{pendingReplies.length > 0 ? ` (${pendingReplies.length})` : ""}
           </button>
+          <button type="button" className="publish-review-button" onClick={openPublishDialog}>
+            <Terminal size={13} /> Publish review
+          </button>
           <button
             type="button"
             className="diff-style-toggle"
@@ -807,6 +965,29 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
             />
           </div>
         </aside>
+      )}
+
+      {publishOpen && (
+        <div className="publish-review-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPublishOpen(false); }}>
+          <section className="publish-review-dialog" role="dialog" aria-modal="true" aria-labelledby="publish-review-title">
+            <header>
+              <div><Terminal size={16} /><span><strong id="publish-review-title">Publish review over SSH</strong><small>Copy and run this command in your terminal.</small></span></div>
+              <button type="button" onClick={() => setPublishOpen(false)} aria-label="Close publish dialog"><X size={16} /></button>
+            </header>
+            <div className="publish-review-fields">
+              <label><span>SSH username</span><input value={sshUser} onChange={(event) => { setSshUser(event.target.value); setCopied(false); }} placeholder="YOUR_USERNAME" /></label>
+              <label><span>SSH host</span><input value={sshHost} onChange={(event) => { setSshHost(event.target.value); setCopied(false); }} /></label>
+              <label><span>SSH port</span><input value={sshPort} onChange={(event) => { setSshPort(event.target.value); setCopied(false); }} inputMode="numeric" /></label>
+              <label className="publish-review-vote"><span>Code-Review</span><select value={codeReview} onChange={(event) => { setCodeReview(event.target.value); setCopied(false); }}><option value="">No vote</option><option value="-2">-2</option><option value="-1">-1</option><option value="0">0</option><option value="1">+1</option><option value="2">+2</option></select></label>
+              <label className="publish-review-message"><span>Review message</span><textarea value={reviewMessage} onChange={(event) => { setReviewMessage(event.target.value); setCopied(false); }} placeholder="Optional overall review message…" /></label>
+            </div>
+            <div className="publish-review-code">
+              <div><span>{data.host} · change {data.changeNumber}, patchset {data.revisionNumber}</span><button type="button" onClick={() => void copyGeneratedReview()}><Copy size={13} /> {copied ? "Copied" : "Copy command"}</button></div>
+              <pre><code>{generatedReview}</code></pre>
+            </div>
+            <p>The command sends Gerrit a <code>ReviewInput</code> JSON document on stdin, including local inline comments and draft replies.</p>
+          </section>
+        </div>
       )}
     </div>
   );

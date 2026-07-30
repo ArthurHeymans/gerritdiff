@@ -15,6 +15,7 @@ A fast, focused diff viewer for public Gerrit changes, inspired by [DiffsHub](ht
 - Unified and side-by-side diff layouts
 - Existing Gerrit discussions grouped by current and historical patchsets
 - Line and range comments using Pierre annotations and gutter utilities
+- Copyable `gerrit review --json` SSH command for publishing comments, replies, a review message, and a Code-Review vote
 - Dark and light Pierre themes
 - Basic SSRF protection for the public proxy
 

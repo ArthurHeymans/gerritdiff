@@ -20,7 +20,7 @@ function getSnapshot(): GerritDiffTheme {
 }
 
 export function useGerritDiffTheme(): GerritDiffTheme {
-  return useSyncExternalStore(subscribe, getSnapshot, () => "dark");
+  return useSyncExternalStore(subscribe, getSnapshot, () => "light");
 }
 
 export function setGerritDiffTheme(theme: GerritDiffTheme) {

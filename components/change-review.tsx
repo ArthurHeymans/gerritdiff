@@ -298,6 +298,21 @@ function shellArg(value: string) {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
+function commentPathLabel(path: string) {
+  if (path === "/PATCHSET_LEVEL") return "Patchset-level comment";
+  if (path === "/COMMIT_MSG") return "Commit message";
+  return path;
+}
+
+function commentLocationLabel(comment: LocalReviewComment) {
+  if (comment.path === "/PATCHSET_LEVEL") return "Whole patchset · not attached to a file";
+  const side = (comment.range.endSide ?? comment.range.side) === "deletions" ? "base" : "revision";
+  const start = comment.textRange?.start_line ?? comment.range.start;
+  const end = comment.textRange?.end_line ?? comment.range.end;
+  if (!end) return `Whole file · ${side}`;
+  return start && start !== end ? `Lines ${start}–${end} · ${side}` : `Line ${end} · ${side}`;
+}
+
 function reviewCommand(host: string, port: string, user: string, change: number, patchset: number, input: object) {
   const destination = `${user.trim() || "YOUR_USERNAME"}@${host}`;
   return `ssh -p ${shellArg(port.trim() || "29418")} ${shellArg(destination)} gerrit review --json ${change},${patchset} <<'GERRIT_REVIEW'\n${JSON.stringify(input, null, 2)}\nGERRIT_REVIEW`;
@@ -508,7 +523,7 @@ function ExistingDiscussion({ annotation, expanded, localReply, onToggle, onSave
   );
 }
 
-function DiscussionSidebar({ threads, revisionNumber, onSelect, onPatchsetSelect }: { threads: DiscussionThread[]; revisionNumber: number; onSelect(thread: DiscussionThread): void; onPatchsetSelect(patchset: number): void }) {
+function DiscussionSidebar({ threads, revisionNumber, onSelect }: { threads: DiscussionThread[]; revisionNumber: number; onSelect(thread: DiscussionThread): void }) {
   if (!threads.length) return <div className="discussion-empty"><MessageSquare size={20} /><strong>No discussion yet</strong><span>Published Gerrit comments will appear here.</span></div>;
   const current = threads.filter((thread) => threadBelongsToPatchset(thread, revisionNumber));
   const other = threads.filter((thread) => !threadBelongsToPatchset(thread, revisionNumber));
@@ -516,11 +531,11 @@ function DiscussionSidebar({ threads, revisionNumber, onSelect, onPatchsetSelect
     const latest = thread.comments.at(-1);
     const patchset = threadPatchset(thread) ?? latest?.patchSet ?? revisionNumber;
     return (
-      <button className={latest?.unresolved ? "sidebar-thread-unresolved" : "sidebar-thread-resolved"} key={thread.id} onClick={() => historical ? onPatchsetSelect(patchset) : onSelect(thread)}>
+      <button className={latest?.unresolved ? "sidebar-thread-unresolved" : "sidebar-thread-resolved"} key={thread.id} onClick={() => onSelect(thread)}>
         <span className="discussion-path">{thread.path === "/PATCHSET_LEVEL" ? "Patchset-level comment" : thread.path}</span>
         <span className="discussion-author"><strong>{thread.comments[0]?.author.name}</strong><i>{latest?.unresolved ? "Unresolved" : "Resolved"}</i></span>
         <p>{commentSummary(thread.comments[0]?.message ?? "")}</p>
-        <span className="discussion-meta">{thread.comments.length} comment{thread.comments.length === 1 ? "" : "s"} · Patchset {patchset}{historical ? " · Open patchset" : ""}</span>
+        <span className="discussion-meta">{thread.comments.length} comment{thread.comments.length === 1 ? "" : "s"} · Patchset {patchset}{historical ? " · Switches patchset" : ""}</span>
       </button>
     );
   };
@@ -632,6 +647,8 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   const [localReviewComments, setLocalReviewComments] = useState<LocalReviewComment[]>([]);
   const [activeThreadKey, setActiveThreadKey] = useState<string | null>(null);
   const [patchsetDiscussionsOpen, setPatchsetDiscussionsOpen] = useState(false);
+  const pendingThreadRef = useRef<{ key: string; patchset: number } | null>(null);
+  const [patchsetDraft, setPatchsetDraft] = useState<{ key: string | null; message: string; resolved: boolean } | null>(null);
   const [relationPanelOpen, setRelationPanelOpen] = useState(data.relationChain.length > 1);
   const [publishOpen, setPublishOpen] = useState(false);
   const [sshUser, setSshUser] = useState("");
@@ -1015,14 +1032,30 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   }), [data.revisionNumber, discussionThreads, localReplies]);
 
   const localCommentCount = localReviewComments.length + localReplies.length;
+  const localPatchsetComments = useMemo(() => localReviewComments.filter((comment) => comment.path === "/PATCHSET_LEVEL"), [localReviewComments]);
+
+  const savePatchsetComment = useCallback((key: string | null, message: string, resolved: boolean) => {
+    const entryKey = key ?? `patchset-level-${nextCommentRef.current++}`;
+    setLocalReviewComments((current) => [
+      ...current.filter((comment) => comment.key !== entryKey),
+      { key: entryKey, path: "/PATCHSET_LEVEL", message, range: { start: 0, end: 0, side: "additions", endSide: "additions" }, unresolved: !resolved },
+    ]);
+    setPatchsetDraft(null);
+  }, []);
+
+  const deletePatchsetComment = useCallback((key: string) => {
+    setLocalReviewComments((current) => current.filter((comment) => comment.key !== key));
+    setPatchsetDraft((draft) => draft?.key === key ? null : draft);
+  }, []);
+
+  const combinedReviewComments = useMemo(() => [
+    ...localReviewComments.filter((comment) => !localReplyComments.some((reply) => reply.key === comment.key)),
+    ...localReplyComments,
+  ], [localReplyComments, localReviewComments]);
 
   const generatedReview = useMemo(() => {
     const comments: Record<string, GerritCommentInput[]> = {};
-    const combined = [
-      ...localReviewComments.filter((comment) => !localReplyComments.some((reply) => reply.key === comment.key)),
-      ...localReplyComments,
-    ];
-    for (const comment of combined) {
+    for (const comment of combinedReviewComments) {
       const file = files.find((candidate) => candidate.name === comment.path);
       comments[comment.path] = [...(comments[comment.path] ?? []), commentInput(comment, file)];
     }
@@ -1031,7 +1064,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     if (codeReview) input.labels = { "Code-Review": Number(codeReview) };
     if (Object.keys(comments).length) input.comments = comments;
     return reviewCommand(sshHost.trim() || data.host, sshPort, sshUser, data.changeNumber, data.revisionNumber, input);
-  }, [codeReview, data.changeNumber, data.host, data.revisionNumber, files, localReviewComments, localReplyComments, reviewMessage, sshHost, sshPort, sshUser]);
+  }, [codeReview, combinedReviewComments, data.changeNumber, data.host, data.revisionNumber, files, reviewMessage, sshHost, sshPort, sshUser]);
 
   const copyGeneratedReview = useCallback(async () => {
     await navigator.clipboard.writeText(generatedReview);
@@ -1105,13 +1138,27 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   }, [data.revision, data.sourceUrl, loadingItems]);
 
   const selectDiscussion = useCallback(async (thread: DiscussionThread) => {
-    const anchor = threadAnchor(thread, data.revisionNumber);
+    const key = `gerrit:${thread.id}`;
     setRelationPanelOpen(false);
+    setPatchsetDiscussionsOpen(false);
+    setActiveThreadKey(key);
+    saveProjectUiSettings(data.host, data.project, { rightPanelOpen: true });
+
+    // Thread lives on another patchset: switch revisions and re-select once it loads.
+    if (!threadBelongsToPatchset(thread, data.revisionNumber)) {
+      const patchset = threadPatchset(thread) ?? thread.comments.at(-1)?.patchSet;
+      if (patchset && patchset !== data.revisionNumber) {
+        pendingThreadRef.current = { key, patchset };
+        onPatchsetChange(patchset);
+        return;
+      }
+    }
+
+    const anchor = threadAnchor(thread, data.revisionNumber);
     const path = anchor?.path ?? thread.path;
     const itemId = path === "/COMMIT_MSG" ? "commit-message" : pathToChangedId.get(path);
-    setPatchsetDiscussionsOpen(false);
-    setActiveThreadKey(`gerrit:${thread.id}`);
-    saveProjectUiSettings(data.host, data.project, { rightPanelOpen: true });
+    // Patchset-level threads (and threads on files absent from this patchset) have no
+    // anchor in the diff; the side panel still shows them.
     if (!itemId) return;
     if (!anchor) {
       scrollToItem(itemId);
@@ -1121,7 +1168,15 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     const range = commentRange(anchor);
     setSelectedLines(anchor.range ? null : { id: itemId, range });
     viewerRef.current?.scrollTo({ type: "range", id: itemId, range, align: "center", behavior: "smooth" });
-  }, [data.host, data.project, data.revisionNumber, loadFullDiff, pathToChangedId, scrollToItem]);
+  }, [data.host, data.project, data.revisionNumber, loadFullDiff, onPatchsetChange, pathToChangedId, scrollToItem]);
+
+  useEffect(() => {
+    const pending = pendingThreadRef.current;
+    if (!pending || pending.patchset !== data.revisionNumber) return;
+    pendingThreadRef.current = null;
+    const thread = discussionThreads.find((candidate) => `gerrit:${candidate.id}` === pending.key);
+    if (thread) void selectDiscussion(thread);
+  }, [data.revisionNumber, discussionThreads, selectDiscussion]);
 
   const openRepositoryFile = useCallback(async (path: string) => {
     const changedId = pathToChangedId.get(path);
@@ -1170,9 +1225,6 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   const initials = data.owner.name.split(/\s+/).slice(0, 2).map((word) => word[0]).join("").toUpperCase();
   const activeThread = activeThreadKey ? discussionThreads.find((thread) => `gerrit:${thread.id}` === activeThreadKey) : undefined;
   const activeAnchor = activeThread ? threadAnchor(activeThread, data.revisionNumber) : undefined;
-  const activeItemId = activeAnchor
-    ? activeAnchor.path === "/COMMIT_MSG" ? "commit-message" : pathToChangedId.get(activeAnchor.path)
-    : undefined;
   const activeRange = activeAnchor ? commentRange(activeAnchor) : undefined;
   const activeAnnotation: DiffLineAnnotation<CommentMetadata> | LineAnnotation<CommentMetadata> | undefined = activeThread && activeAnchor && activeRange
     ? activeAnchor.path === "/COMMIT_MSG"
@@ -1187,7 +1239,22 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
         }
     : undefined;
 
-  const discussionPanelVisible = patchsetDiscussionsOpen || Boolean(activeAnnotation && activeItemId);
+  // Unanchored threads (patchset-level, or on a file not in this patchset) still get a
+  // panel-only annotation so they can be read and replied to.
+  const activePanelAnnotation: DiffLineAnnotation<CommentMetadata> | LineAnnotation<CommentMetadata> | undefined =
+    activeAnnotation ?? (activeThread
+      ? {
+          lineNumber: 0,
+          metadata: {
+            kind: "existing",
+            key: `gerrit:${activeThread.id}`,
+            range: commentRange(activeThread.comments[0]),
+            thread: activeThread,
+          },
+        }
+      : undefined);
+
+  const discussionPanelVisible = patchsetDiscussionsOpen || Boolean(activePanelAnnotation);
   const sidePanelVisible = relationPanelOpen || discussionPanelVisible;
 
   return (
@@ -1203,7 +1270,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
         </div>
         {sidebarMode === "changed" && <ReviewFileTree files={files} onSelect={scrollToItem} />}
         {sidebarMode === "repository" && <RepositoryBrowser changedFiles={files} sourceUrl={data.sourceUrl} onOpenFile={openRepositoryFile} />}
-        {sidebarMode === "discussion" && <DiscussionSidebar threads={discussionThreads} revisionNumber={data.revisionNumber} onSelect={(thread) => void selectDiscussion(thread)} onPatchsetSelect={onPatchsetChange} />}
+        {sidebarMode === "discussion" && <DiscussionSidebar threads={discussionThreads} revisionNumber={data.revisionNumber} onSelect={(thread) => void selectDiscussion(thread)} />}
         {sidebarMode === "repository" && (
           <form className="known-path-form" onSubmit={(event) => { event.preventDefault(); const path = knownPath.trim().replace(/^\/+/, ""); if (path) void openRepositoryFile(path); }}>
             <input value={knownPath} onChange={(event) => setKnownPath(event.target.value)} placeholder="Open a known path…" />
@@ -1261,27 +1328,30 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
               <span>Relation chain</span>
               <b>{data.relationChain.length}</b>
             </button>
-            {patchsetLevelThreads.length > 0 && (
-              <button
-                type="button"
-                className={`patchset-discussions-button${unresolvedPatchsetDiscussionCount > 0 ? " has-unresolved" : ""}`}
-                aria-expanded={patchsetDiscussionsOpen}
-                title={`${patchsetLevelThreads.length} patchset-level discussion${patchsetLevelThreads.length === 1 ? "" : "s"}${unresolvedPatchsetDiscussionCount ? `, ${unresolvedPatchsetDiscussionCount} unresolved` : ""}`}
-                onClick={() => {
-                  setRelationPanelOpen(false);
-                  setActiveThreadKey(null);
-                  setPatchsetDiscussionsOpen((open) => {
-                    const next = !open;
-                    saveProjectUiSettings(data.host, data.project, { rightPanelOpen: next });
-                    return next;
-                  });
-                }}
-              >
-                <MessageSquare size={12} />
-                <span>{patchsetLevelThreads.length} patchset discussion{patchsetLevelThreads.length === 1 ? "" : "s"}</span>
-                {unresolvedPatchsetDiscussionCount > 0 && <b>{unresolvedPatchsetDiscussionCount} unresolved</b>}
-              </button>
-            )}
+            <button
+              type="button"
+              className={`patchset-discussions-button${unresolvedPatchsetDiscussionCount > 0 ? " has-unresolved" : ""}`}
+              aria-expanded={patchsetDiscussionsOpen}
+              title={patchsetLevelThreads.length
+                ? `${patchsetLevelThreads.length} patchset-level comment${patchsetLevelThreads.length === 1 ? "" : "s"}${unresolvedPatchsetDiscussionCount ? `, ${unresolvedPatchsetDiscussionCount} unresolved` : ""}`
+                : "Comment on the whole patchset, not a specific file"}
+              onClick={() => {
+                setRelationPanelOpen(false);
+                setActiveThreadKey(null);
+                setPatchsetDiscussionsOpen((open) => {
+                  const next = !open;
+                  saveProjectUiSettings(data.host, data.project, { rightPanelOpen: next });
+                  return next;
+                });
+              }}
+            >
+              <MessageSquare size={12} />
+              <span>{patchsetLevelThreads.length || localPatchsetComments.length
+                ? `${patchsetLevelThreads.length + localPatchsetComments.length} patchset comment${patchsetLevelThreads.length + localPatchsetComments.length === 1 ? "" : "s"}`
+                : "Patchset comment"}</span>
+              {unresolvedPatchsetDiscussionCount > 0 && <b>{unresolvedPatchsetDiscussionCount} unresolved</b>}
+              {localPatchsetComments.length > 0 && <b className="is-draft">{localPatchsetComments.length} draft</b>}
+            </button>
           </div>
         </div>
         {repositoryError && <div className="repository-error"><X size={13} /> <span>{repositoryError}</span><button onClick={() => setRepositoryError("")} aria-label="Dismiss"><X size={12} /></button></div>}
@@ -1363,12 +1433,13 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
           <div className="discussion-panel-head">
             <div>
               <span>{relationPanelOpen ? "Relation chain" : patchsetDiscussionsOpen ? "Patchset discussions" : "Discussion"}</span>
-              <strong>{relationPanelOpen ? `${data.relationChain.length} change${data.relationChain.length === 1 ? "" : "s"}` : patchsetDiscussionsOpen ? `${patchsetLevelThreads.length} thread${patchsetLevelThreads.length === 1 ? "" : "s"}` : `${activeThread?.comments.length ?? 0} comment${activeThread?.comments.length === 1 ? "" : "s"}`}</strong>
+              <strong>{relationPanelOpen ? `${data.relationChain.length} change${data.relationChain.length === 1 ? "" : "s"}` : patchsetDiscussionsOpen ? `Patchset ${data.revisionNumber} · ${patchsetLevelThreads.length} thread${patchsetLevelThreads.length === 1 ? "" : "s"}${localPatchsetComments.length ? `, ${localPatchsetComments.length} draft` : ""}` : `${activeThread?.comments.length ?? 0} comment${activeThread?.comments.length === 1 ? "" : "s"}`}</strong>
             </div>
             <button type="button" onClick={() => { setRelationPanelOpen(false); setPatchsetDiscussionsOpen(false); setActiveThreadKey(null); saveProjectUiSettings(data.host, data.project, { rightPanelOpen: false }); }} aria-label="Close side panel"><X size={15} /></button>
           </div>
           <div className={`discussion-panel-body${patchsetDiscussionsOpen && !relationPanelOpen ? " patchset-discussion-list" : ""}`}>
-            {relationPanelOpen ? <RelationChainPanel relations={data.relationChain} /> : patchsetDiscussionsOpen ? patchsetLevelThreads.map((thread) => {
+            {relationPanelOpen ? <RelationChainPanel relations={data.relationChain} /> : null}
+            {!relationPanelOpen && patchsetDiscussionsOpen ? patchsetLevelThreads.map((thread) => {
               const range = commentRange(thread.comments[0]);
               const annotation: LineAnnotation<CommentMetadata> = {
                 lineNumber: 0,
@@ -1385,9 +1456,57 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
                   onDeleteReply={deleteLocalReply}
                 />
               );
-            }) : activeAnnotation && activeItemId ? (
+            }) : null}
+            {patchsetDiscussionsOpen && !relationPanelOpen && (
+              <>
+                {localPatchsetComments.map((comment) => (
+                  <div className="comment-card patchset-draft-card" key={comment.key}>
+                    <div className="patchset-draft-head">
+                      <strong>Patchset comment draft</strong>
+                      <span className={`thread-state ${comment.unresolved ? "is-unresolved" : "is-resolved"}`}>{comment.unresolved ? "Unresolved" : "Resolved"}</span>
+                    </div>
+                    <p>{comment.message}</p>
+                    <div className="discussion-actions">
+                      <button onClick={() => setPatchsetDraft({ key: comment.key, message: comment.message, resolved: !comment.unresolved })}>Edit</button>
+                      <button onClick={() => deletePatchsetComment(comment.key)}>Discard</button>
+                    </div>
+                  </div>
+                ))}
+                {patchsetDraft ? (
+                  <form
+                    className="comment-card discussion-reply patchset-composer"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      const trimmed = patchsetDraft.message.trim();
+                      if (trimmed) savePatchsetComment(patchsetDraft.key, trimmed, patchsetDraft.resolved);
+                    }}
+                  >
+                    <textarea autoFocus rows={4} value={patchsetDraft.message} onChange={(event) => setPatchsetDraft((draft) => draft ? { ...draft, message: event.target.value } : draft)} placeholder="Comment on the whole patchset…" />
+                    <div className="reply-options">
+                      <button className={`resolution-toggle ${patchsetDraft.resolved ? "is-resolved" : "is-unresolved"}`} type="button" aria-pressed={patchsetDraft.resolved} onClick={() => setPatchsetDraft((draft) => draft ? { ...draft, resolved: !draft.resolved } : draft)}>
+                        <CircleCheck size={12} /> {patchsetDraft.resolved ? "Resolved" : "Unresolved"}
+                      </button>
+                      <span>Unresolved comments block until someone marks them done.</span>
+                    </div>
+                    <div>
+                      <span>Sent as a <code>/PATCHSET_LEVEL</code> comment when you publish.</span>
+                      <button type="button" onClick={() => setPatchsetDraft(null)}>Cancel</button>
+                      <button type="submit" disabled={!patchsetDraft.message.trim()}>Save comment</button>
+                    </div>
+                  </form>
+                ) : (
+                  <button type="button" className="patchset-add-comment" onClick={() => setPatchsetDraft({ key: null, message: "", resolved: false })}>
+                    <MessageSquare size={13} /> Add patchset comment
+                  </button>
+                )}
+                {patchsetLevelThreads.length === 0 && localPatchsetComments.length === 0 && !patchsetDraft && (
+                  <p className="patchset-empty-hint">Patchset comments apply to the change as a whole instead of a file or line — and unlike the cover message, they can be resolved and replied to.</p>
+                )}
+              </>
+            )}
+            {!patchsetDiscussionsOpen && !relationPanelOpen && activePanelAnnotation ? (
               <ExistingDiscussion
-                annotation={activeAnnotation}
+                annotation={activePanelAnnotation}
                 expanded
                 localReply={localReplies.find((reply) => reply.key === activeThreadKey)}
                 onToggle={() => setActiveThreadKey(null)}
@@ -1411,13 +1530,38 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
               <label><span>SSH host</span><input value={sshHost} onChange={(event) => { setSshHost(event.target.value); setCopied(false); }} /></label>
               <label><span>SSH port</span><input value={sshPort} onChange={(event) => { setSshPort(event.target.value); setCopied(false); }} inputMode="numeric" /></label>
               <label className="publish-review-vote"><span>Code-Review</span><select value={codeReview} onChange={(event) => { setCodeReview(event.target.value); setCopied(false); }}><option value="">No vote</option><option value="-2">-2</option><option value="-1">-1</option><option value="0">0</option><option value="1">+1</option><option value="2">+2</option></select></label>
-              <label className="publish-review-message"><span>Review message</span><textarea value={reviewMessage} onChange={(event) => { setReviewMessage(event.target.value); setCopied(false); }} placeholder="Optional overall review message…" /></label>
+              <label className="publish-review-message"><span>Cover message</span><textarea value={reviewMessage} onChange={(event) => { setReviewMessage(event.target.value); setCopied(false); }} placeholder="Optional message posted alongside your vote…" /><small>Posted as the change message. For something that can be resolved and replied to, use a patchset comment instead.</small></label>
             </div>
+            {combinedReviewComments.length > 0 && (
+              <div className="publish-review-summary">
+                <div className="publish-review-summary-head">
+                  <MessageSquare size={12} />
+                  <strong>{combinedReviewComments.length} comment{combinedReviewComments.length === 1 ? "" : "s"} in this review</strong>
+                </div>
+                <ul>
+                  {combinedReviewComments.map((comment) => (
+                    <li key={comment.key}>
+                      <span className="publish-review-summary-where">
+                        <b title={comment.path}>{commentPathLabel(comment.path)}</b>
+                        <i>{commentLocationLabel(comment)}</i>
+                      </span>
+                      <span className="publish-review-summary-tags">
+                        <span className="publish-review-tag">{comment.inReplyTo ? "Reply" : "New comment"}</span>
+                        {comment.unresolved !== undefined && (
+                          <span className={`publish-review-tag ${comment.unresolved ? "is-unresolved" : "is-resolved"}`}>{comment.unresolved ? "Unresolved" : "Resolved"}</span>
+                        )}
+                      </span>
+                      <p>{commentSummary(comment.message)}</p>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <div className="publish-review-code">
               <div><span>{data.host} · change {data.changeNumber}, patchset {data.revisionNumber}</span><button type="button" onClick={() => void copyGeneratedReview()}><Copy size={13} /> {copied ? "Copied" : "Copy command"}</button></div>
               <pre><code>{generatedReview}</code></pre>
             </div>
-            <p>The command sends Gerrit a <code>ReviewInput</code> JSON document on stdin, including local inline comments and replies.</p>
+            <p>The command sends Gerrit a <code>ReviewInput</code> JSON document on stdin, including local inline comments and replies. Comments are keyed by file path; <code>/PATCHSET_LEVEL</code> is Gerrit&rsquo;s reserved path for change-wide comments that aren&rsquo;t attached to a file, and <code>/COMMIT_MSG</code> targets the commit message.</p>
           </section>
         </div>
       )}

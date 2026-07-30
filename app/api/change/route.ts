@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { parseGerritJson, publicFetch, resolveChange } from "@/lib/gerrit-server";
-import type { ChangeData, ComparisonFile, GerritComment, RelatedChange } from "@/lib/types";
+import type { ChangeData, ComparisonFile, GerritComment, GerritReviewer, RelatedChange } from "@/lib/types";
 
 export const runtime = "nodejs";
 
@@ -216,6 +216,38 @@ export async function GET(request: NextRequest) {
       isCurrent: true,
     });
 
+    const accountKey = (account: { _account_id?: number; email?: string; name?: string; display_name?: string }) =>
+      account._account_id !== undefined
+        ? `id:${account._account_id}`
+        : `name:${account.email ?? account.display_name ?? account.name ?? "unknown"}`;
+    const labelVotes = (label: string) => new Map(
+      (detail.labels?.[label]?.all ?? [])
+        .filter((account) => account.value !== undefined)
+        .map((account) => [accountKey(account), account.value] as const),
+    );
+    const codeReviewVotes = labelVotes("Code-Review");
+    const verifiedVotes = labelVotes("Verified");
+    const currentReviewerAccounts = detail.reviewers?.REVIEWER ?? [];
+    const fallbackVoters = [
+      ...(detail.labels?.["Code-Review"]?.all ?? []),
+      ...(detail.labels?.Verified?.all ?? []),
+    ].filter((account) => account.value !== undefined && account.value !== 0);
+    const reviewerAccounts = [...new Map(
+      (currentReviewerAccounts.length ? currentReviewerAccounts : fallbackVoters)
+        .map((account) => [accountKey(account), account] as const),
+    ).values()];
+    const reviewers: GerritReviewer[] = reviewerAccounts.map((account) => {
+      const avatar = account.avatars?.toSorted((a, b) => b.height - a.height)[0]?.url;
+      const key = accountKey(account);
+      return {
+        name: account.display_name ?? account.name ?? account.email ?? "Unknown reviewer",
+        email: account.email,
+        avatarUrl: avatar ? new URL(avatar, parsed.origin).toString() : undefined,
+        codeReview: codeReviewVotes.get(key),
+        verified: verifiedVotes.get(key),
+      };
+    });
+
     const avatar = detail.owner.avatars?.toSorted((a, b) => b.height - a.height)[0]?.url;
     const avatarUrl = avatar ? new URL(avatar, parsed.origin).toString() : undefined;
     const data: ChangeData = {
@@ -232,6 +264,7 @@ export async function GET(request: NextRequest) {
         email: detail.owner.email,
         avatarUrl,
       },
+      reviewers,
       revision,
       revisionNumber,
       revisions: Object.entries(detail.revisions)

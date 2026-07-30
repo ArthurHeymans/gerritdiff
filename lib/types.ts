@@ -35,6 +35,14 @@ export type RelatedChange = {
   isCurrent: boolean;
 };
 
+export type GerritReviewer = {
+  name: string;
+  email?: string;
+  avatarUrl?: string;
+  codeReview?: number;
+  verified?: number;
+};
+
 export type ChangeData = {
   host: string;
   sourceUrl: string;
@@ -45,6 +53,7 @@ export type ChangeData = {
   branch: string;
   status: string;
   owner: { name: string; email?: string; avatarUrl?: string };
+  reviewers: GerritReviewer[];
   revision: string;
   revisionNumber: number;
   revisions: { revision: string; number: number; created?: string; uploader?: string }[];

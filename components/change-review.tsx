@@ -18,6 +18,7 @@ import { CodeView, type CodeViewHandle, WorkerPoolContextProvider } from "@pierr
 import type { GitStatus, GitStatusEntry } from "@pierre/trees";
 import { FileTree, useFileTree } from "@pierre/trees/react";
 import { Check, ChevronDown, CircleCheck, Columns2, Copy, FileText, GitBranch, LoaderCircle, MessageSquare, PanelLeftClose, PanelLeftOpen, Pencil, Pilcrow, Quote, Reply, Rows3, Send, Settings2, Terminal, Trash2, X } from "lucide-react";
+import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RepositoryBrowser } from "@/components/repository-browser";
 import type { ChangeData, GerritComment, RelatedChange } from "@/lib/types";
@@ -610,7 +611,7 @@ function RelationChainPanel({ relations }: { relations: RelatedChange[] }) {
         return relation.isCurrent || !relation.sourceUrl ? (
           <div key={`${relation.commit}:${index}`} className={`relation-item${relation.isCurrent ? " is-current" : ""}`} aria-current={relation.isCurrent ? "page" : undefined}>{content}</div>
         ) : (
-          <a key={`${relation.commit}:${index}`} className="relation-item" href={`/?url=${encodeURIComponent(relation.sourceUrl)}`}>{content}</a>
+          <button key={`${relation.commit}:${index}`} type="button" className="relation-item" onClick={() => { window.location.href = `/?url=${encodeURIComponent(relation.sourceUrl!)}`; }}>{content}</button>
         );
       })}
     </div>
@@ -1346,6 +1347,9 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   }, [commentScope, fileLevelThreads, loadFullDiff, loadingItems, localFileLevelComments, openCommentScope]);
 
   const initials = data.owner.name.split(/\s+/).slice(0, 2).map((word) => word[0]).join("").toUpperCase();
+  const reviewers = data.reviewers ?? [];
+  const voteText = (value: number | undefined) => value === undefined ? "—" : value > 0 ? `+${value}` : String(value);
+  const voteClass = (value: number | undefined) => value === undefined || value === 0 ? "neutral" : value > 0 ? "positive" : "negative";
   const activeThread = activeThreadKey ? discussionThreads.find((thread) => `gerrit:${thread.id}` === activeThreadKey) : undefined;
   const activeAnchor = activeThread ? threadAnchor(activeThread, data.revisionNumber) : undefined;
   const activeRange = activeAnchor ? commentRange(activeAnchor) : undefined;
@@ -1469,6 +1473,20 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
               {unresolvedPatchsetDiscussionCount > 0 && <b>{unresolvedPatchsetDiscussionCount} unresolved</b>}
               {localPatchsetComments.length > 0 && <b className="is-draft">{localPatchsetComments.length} draft</b>}
             </button>
+          </div>
+          <div className="reviewers-summary" aria-label="Current reviewers and votes">
+            <span className="reviewers-label">Reviewers</span>
+            {reviewers.length ? reviewers.map((reviewer, index) => {
+              const reviewerInitials = reviewer.name.split(/\s+/).slice(0, 2).map((word) => word[0]).join("").toUpperCase();
+              return (
+                <span className="reviewer-chip" key={reviewer.email ?? `${reviewer.name}:${index}`} title={reviewer.email}>
+                  <span className="reviewer-avatar">{reviewer.avatarUrl ? <Image src={reviewer.avatarUrl} alt="" width={19} height={19} unoptimized /> : reviewerInitials}</span>
+                  <strong>{reviewer.name}</strong>
+                  <span className={`reviewer-vote ${voteClass(reviewer.codeReview)}`} title={`Code-Review ${voteText(reviewer.codeReview)}`} aria-label={`Code-Review ${voteText(reviewer.codeReview)}`}>CR {voteText(reviewer.codeReview)}</span>
+                  <span className={`reviewer-vote verified ${voteClass(reviewer.verified)}`} title={`Verified ${voteText(reviewer.verified)}`} aria-label={`Verified ${voteText(reviewer.verified)}`}>V {voteText(reviewer.verified)}</span>
+                </span>
+              );
+            }) : <span className="reviewers-empty">No current reviewers</span>}
           </div>
         </div>
         {repositoryError && <div className="repository-error"><X size={13} /> <span>{repositoryError}</span><button onClick={() => setRepositoryError("")} aria-label="Dismiss"><X size={12} /></button></div>}

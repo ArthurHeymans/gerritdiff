@@ -214,7 +214,7 @@ function CommentText({ comment }: { comment: GerritComment }) {
   );
 }
 
-function ExistingDiscussion({ annotation, itemId, pendingReply, onSaveDraft, onDeleteDraft }: { annotation: DiffLineAnnotation<CommentMetadata>; itemId: string; pendingReply?: PendingReply; onSaveDraft(reply: PendingReply): void; onDeleteDraft(key: string): void }) {
+function ExistingDiscussion({ annotation, itemId, expanded, pendingReply, onToggle, onSaveDraft, onDeleteDraft }: { annotation: DiffLineAnnotation<CommentMetadata>; itemId: string; expanded: boolean; pendingReply?: PendingReply; onToggle(key: string): void; onSaveDraft(reply: PendingReply): void; onDeleteDraft(key: string): void }) {
   const metadata = annotation.metadata;
   const [draft, setDraft] = useState<{ message: string; resolved: boolean } | null>(null);
   if (!metadata || metadata.kind !== "existing") return null;
@@ -228,12 +228,32 @@ function ExistingDiscussion({ annotation, itemId, pendingReply, onSaveDraft, onD
     onSaveDraft({ itemId, key: metadata.key, message: trimmed, resolved: draft.resolved });
     setDraft(null);
   };
+  if (!expanded) {
+    return (
+      <div className={`comment-card existing-discussion existing-discussion-collapsed ${unresolved ? "thread-unresolved" : "thread-resolved"}`}>
+        <button type="button" className="collapsed-thread-button" onClick={(event) => { event.stopPropagation(); onToggle(metadata.key); }} aria-expanded="false">
+          <MessageSquare size={14} />
+          <span className="collapsed-thread-copy">
+            <span><strong>{latest?.author.name ?? "Review discussion"}</strong><small>{metadata.thread.comments.length} comment{metadata.thread.comments.length === 1 ? "" : "s"}</small></span>
+            <span>{commentSummary(latest?.message ?? "")}</span>
+          </span>
+          {pendingReply && <span className="collapsed-thread-draft">Draft</span>}
+          <span className="thread-state">{unresolved ? "Unresolved" : "Resolved"}</span>
+          <ChevronDown size={14} />
+        </button>
+      </div>
+    );
+  }
   return (
     <div className={`comment-card existing-discussion ${unresolved ? "thread-unresolved" : "thread-resolved"}`}>
-      <div className="existing-thread-head">
-        <strong>{metadata.thread.comments.length === 1 ? "Review comment" : `${metadata.thread.comments.length} comment discussion`}</strong>
+      <button type="button" className="existing-thread-head" onClick={(event) => { event.stopPropagation(); onToggle(metadata.key); }} aria-expanded="true">
+        <span className="existing-thread-heading">
+          <span className="existing-thread-path" title={metadata.thread.path}>{metadata.thread.path}</span>
+          <strong>{metadata.thread.comments.length === 1 ? "Review comment" : `${metadata.thread.comments.length} comment discussion`}</strong>
+        </span>
         <span className="thread-state">{unresolved ? "Unresolved" : "Resolved"}</span>
-      </div>
+        <ChevronDown className="expanded-thread-chevron" size={14} />
+      </button>
       {metadata.thread.comments.map((comment) => (
         <div className={`existing-comment${comment.id.startsWith("local-reply-") ? " local-reply" : ""}`} key={comment.id}>
           <span className="comment-avatar" style={comment.author.avatarUrl ? { backgroundImage: `url(${comment.author.avatarUrl})` } : undefined}>
@@ -361,6 +381,8 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   const [repositoryError, setRepositoryError] = useState("");
   const [loadingItems, setLoadingItems] = useState<ReadonlySet<string>>(() => new Set());
   const [pendingReplies, setPendingReplies] = useState<PendingReply[]>([]);
+  const [activeThreadKey, setActiveThreadKey] = useState<string | null>(null);
+  const commitMessageBody = data.commitMessage.split(/\r?\n/).slice(1).join("\n").trim();
 
   const files = useMemo(() => {
     if (!data.comparisonFiles) return parsePatchFiles(data.patch, `${data.host}-${data.changeNumber}-${data.revisionNumber}`, true).flatMap((parsed) => parsed.files);
@@ -384,21 +406,28 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   const [discussionThreads, setDiscussionThreads] = useState(() => buildDiscussionThreads(data.comments));
   const currentDiscussionCount = discussionThreads.filter((thread) => Boolean(threadAnchor(thread, data.revisionNumber))).length;
   const initialItems = useMemo<CodeViewItem<CommentMetadata>[]>(
-    () => files.map((fileDiff, index) => {
-      const annotations: DiffLineAnnotation<CommentMetadata>[] = [];
-      for (const thread of discussionThreads) {
-        const anchor = threadAnchor(thread, data.revisionNumber);
-        if (!anchor || anchor.path !== fileDiff.name) continue;
-        const range = commentRange(anchor);
-        annotations.push({
-          side: range.side ?? "additions",
-          lineNumber: range.end,
-          metadata: { kind: "existing", key: `gerrit:${thread.id}`, range, thread },
-        });
-      }
-      return { id: `file-${index}`, type: "diff", fileDiff, annotations };
-    }),
-    [data.revisionNumber, discussionThreads, files],
+    () => [
+      ...(commitMessageBody ? [{
+        id: "commit-message",
+        type: "file" as const,
+        file: { name: "Commit message", contents: commitMessageBody, cacheKey: `${data.revision}:commit-message` },
+      }] : []),
+      ...files.map((fileDiff, index) => {
+        const annotations: DiffLineAnnotation<CommentMetadata>[] = [];
+        for (const thread of discussionThreads) {
+          const anchor = threadAnchor(thread, data.revisionNumber);
+          if (!anchor || anchor.path !== fileDiff.name) continue;
+          const range = commentRange(anchor);
+          annotations.push({
+            side: range.side ?? "additions",
+            lineNumber: range.end,
+            metadata: { kind: "existing", key: `gerrit:${thread.id}`, range, thread },
+          });
+        }
+        return { id: `file-${index}`, type: "diff" as const, fileDiff, annotations };
+      }),
+    ],
+    [commitMessageBody, data.revision, data.revisionNumber, discussionThreads, files],
   );
   const pathToChangedId = useMemo(
     () => new Map(files.map((file, index) => [file.name, `file-${index}`])),
@@ -541,6 +570,10 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     setPendingReplies((current) => current.filter((entry) => entry.key !== key));
   }, []);
 
+  const toggleActiveDiscussion = useCallback((key: string) => {
+    setActiveThreadKey((current) => current === key ? null : key);
+  }, []);
+
   const pushPendingReplies = useCallback(() => {
     for (const reply of pendingReplies) addDiscussionReply(reply.itemId, reply.key, reply.message, reply.resolved);
     setPendingReplies([]);
@@ -548,11 +581,11 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
 
   const renderAnnotation = useCallback((annotation: DiffLineAnnotation<CommentMetadata> | LineAnnotation<CommentMetadata>, item: CodeViewItem<CommentMetadata>) => {
     if (!("side" in annotation) || item.type !== "diff" || !annotation.metadata) return null;
-    if (annotation.metadata.kind === "existing") return <ExistingDiscussion annotation={annotation} itemId={item.id} pendingReply={pendingReplies.find((reply) => reply.key === annotation.metadata?.key)} onSaveDraft={savePendingReply} onDeleteDraft={deletePendingReply} />;
+    if (annotation.metadata.kind === "existing") return <ExistingDiscussion annotation={annotation} itemId={item.id} expanded={false} pendingReply={pendingReplies.find((reply) => reply.key === annotation.metadata?.key)} onToggle={toggleActiveDiscussion} onSaveDraft={savePendingReply} onDeleteDraft={deletePendingReply} />;
     return annotation.metadata.kind === "draft"
       ? <DraftComment annotation={annotation} itemId={item.id} onCancel={removeComment} onSave={saveComment} />
       : <SavedComment annotation={annotation} itemId={item.id} onDelete={removeComment} onSelect={toggleCommentSelection} />;
-  }, [deletePendingReply, pendingReplies, removeComment, saveComment, savePendingReply, toggleCommentSelection]);
+  }, [deletePendingReply, pendingReplies, removeComment, saveComment, savePendingReply, toggleActiveDiscussion, toggleCommentSelection]);
 
   const renderHeaderPrefix = useCallback((item: CodeViewItem<CommentMetadata>) => {
     if (item.type !== "diff") return null;
@@ -600,6 +633,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   const selectDiscussion = useCallback(async (thread: DiscussionThread) => {
     const anchor = threadAnchor(thread, data.revisionNumber);
     const itemId = pathToChangedId.get(anchor?.path ?? thread.path);
+    setActiveThreadKey(`gerrit:${thread.id}`);
     if (!itemId) return;
     if (!anchor) {
       scrollToItem(itemId);
@@ -656,10 +690,18 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   }, [loadFullDiff, loadingItems]);
 
   const initials = data.owner.name.split(/\s+/).slice(0, 2).map((word) => word[0]).join("").toUpperCase();
-  const commitMessageBody = data.commitMessage.split(/\r?\n/).slice(1).join("\n").trim();
+  const activeThread = activeThreadKey ? discussionThreads.find((thread) => `gerrit:${thread.id}` === activeThreadKey) : undefined;
+  const activeAnchor = activeThread ? threadAnchor(activeThread, data.revisionNumber) : undefined;
+  const activeItemId = activeAnchor ? pathToChangedId.get(activeAnchor.path) : undefined;
+  const activeRange = activeAnchor ? commentRange(activeAnchor) : undefined;
+  const activeAnnotation: DiffLineAnnotation<CommentMetadata> | undefined = activeThread && activeRange ? {
+    side: activeRange.side ?? "additions",
+    lineNumber: activeRange.end,
+    metadata: { kind: "existing", key: `gerrit:${activeThread.id}`, range: activeRange, thread: activeThread },
+  } : undefined;
 
   return (
-    <div className="review-layout">
+    <div className={`review-layout${activeAnnotation && activeItemId ? " with-discussion-panel" : ""}`}>
       <aside className="sidebar pierre-sidebar">
         <div className="sidebar-tabs">
           <button className={sidebarMode === "changed" ? "active" : ""} onClick={() => setSidebarMode("changed")}>Changed <b>{files.length}</b></button>
@@ -683,12 +725,13 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
 
       <section className="change-main pierre-main">
         <div className="change-header">
-          <div className="change-kicker">
-            <span className={`change-status ${data.status.toLowerCase()}`}>{data.status}</span>
-            <span>{data.project}</span><span>/</span><span>change {data.changeNumber}</span>
+          <div className="change-title-row">
+            <div className="change-kicker">
+              <span className={`change-status ${data.status.toLowerCase()}`}>{data.status}</span>
+              <span>{data.project}</span><span>/</span><span>change {data.changeNumber}</span>
+            </div>
+            <h1 title={data.subject}>{data.subject}</h1>
           </div>
-          <h1>{data.subject}</h1>
-          {commitMessageBody && <pre className="commit-message-body">{commitMessageBody}</pre>}
           <div className="change-meta">
             <span className="avatar" style={data.owner.avatarUrl ? { backgroundImage: `url(${data.owner.avatarUrl})` } : undefined}>{data.owner.avatarUrl ? null : initials}</span>
             <strong>{data.owner.name}</strong>
@@ -741,6 +784,26 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
           renderHeaderMetadata={renderHeaderMetadata}
         />
       </section>
+
+      {activeAnnotation && activeItemId && (
+        <aside className="discussion-panel" aria-label="Selected discussion">
+          <div className="discussion-panel-head">
+            <div><span>Discussion</span><strong>{activeThread?.comments.length ?? 0} comment{activeThread?.comments.length === 1 ? "" : "s"}</strong></div>
+            <button type="button" onClick={() => setActiveThreadKey(null)} aria-label="Close discussion panel"><X size={15} /></button>
+          </div>
+          <div className="discussion-panel-body">
+            <ExistingDiscussion
+              annotation={activeAnnotation}
+              itemId={activeItemId}
+              expanded
+              pendingReply={pendingReplies.find((reply) => reply.key === activeThreadKey)}
+              onToggle={() => setActiveThreadKey(null)}
+              onSaveDraft={savePendingReply}
+              onDeleteDraft={deletePendingReply}
+            />
+          </div>
+        </aside>
+      )}
     </div>
   );
 }

@@ -51,8 +51,9 @@ async function fetchComparison(changePath: string, targetRevision: string, baseR
   const entries = Object.entries(parseGerritJson<GerritFiles>(await response.text())).filter(([path]) => !path.startsWith("/"));
   const files: ComparisonFile[] = [];
   let totalSize = 0;
-  for (let index = 0; index < entries.length; index += 8) {
-    const batch = await Promise.all(entries.slice(index, index + 8).map(async ([path, info]) => {
+  const comparisonConcurrency = 4;
+  for (let index = 0; index < entries.length; index += comparisonConcurrency) {
+    const batch = await Promise.all(entries.slice(index, index + comparisonConcurrency).map(async ([path, info]) => {
       const previousName = info.old_path;
       const [base, target] = await Promise.all([
         fetchRevisionContent(changePath, baseRevision, previousName ?? path),

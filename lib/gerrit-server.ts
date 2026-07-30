@@ -87,16 +87,26 @@ export function parseGerritJson<T>(text: string): T {
 
 export async function publicFetch(url: string, accept = "application/json", allowNotFound = false) {
   await assertPublicUrl(url);
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      headers: { Accept: accept, "User-Agent": "GerritDiff/0.1" },
-      redirect: "error",
-      signal: AbortSignal.timeout(20_000),
-    });
-  } catch {
-    throw new Error("The Gerrit server could not be reached.");
+  const maxAttempts = 3;
+  let response: Response | undefined;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      response = await fetch(url, {
+        headers: { Accept: accept, "User-Agent": "GerritDiff/0.1" },
+        redirect: "error",
+        signal: AbortSignal.timeout(20_000),
+      });
+    } catch {
+      if (attempt === maxAttempts - 1) throw new Error("The Gerrit server could not be reached.");
+      await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
+      continue;
+    }
+    if (![429, 502, 503, 504].includes(response.status) || attempt === maxAttempts - 1) break;
+    const retryAfter = Number(response.headers.get("retry-after"));
+    const delay = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1_000 : 250 * 2 ** attempt;
+    await new Promise((resolve) => setTimeout(resolve, delay));
   }
+  if (!response) throw new Error("The Gerrit server could not be reached.");
   if (allowNotFound && response.status === 404) return null;
   if (!response.ok) {
     if (response.status === 401 || response.status === 403) throw new Error("This resource is private or anonymous access is disabled.");

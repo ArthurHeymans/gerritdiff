@@ -101,6 +101,14 @@ function threadAnchor(thread: DiscussionThread, revisionNumber: number) {
   return thread.comments.find((comment) => (comment.patchSet === revisionNumber || comment.ported) && (comment.line || comment.range));
 }
 
+function threadPatchset(thread: DiscussionThread) {
+  return thread.comments[0]?.patchSet;
+}
+
+function threadBelongsToPatchset(thread: DiscussionThread, revisionNumber: number) {
+  return Boolean(threadAnchor(thread, revisionNumber)) || (thread.path === "/PATCHSET_LEVEL" && threadPatchset(thread) === revisionNumber);
+}
+
 function commentRange(comment: GerritComment): SelectedLineRange {
   const side = comment.side === "PARENT" ? "deletions" : "additions";
   return { start: comment.range?.startLine ?? comment.line ?? 0, end: comment.range?.endLine ?? comment.line ?? 0, side, endSide: side };
@@ -186,7 +194,7 @@ function commentInput(comment: LocalReviewComment, file?: FileDiffMetadata): Ger
     return input;
   }
   if (comment.range.start === comment.range.end || !file) {
-    input.line = comment.range.end;
+    if (comment.range.end > 0) input.line = comment.range.end;
     return input;
   }
   const hunk = file.hunks.find((candidate) => {
@@ -377,7 +385,7 @@ function ExistingDiscussion({ annotation, itemId, expanded, pendingReply, onTogg
     <div className={`comment-card existing-discussion ${unresolved ? "thread-unresolved" : "thread-resolved"}`}>
       <button type="button" className="existing-thread-head" onClick={(event) => { event.stopPropagation(); onToggle(metadata.key); }} aria-expanded="true">
         <span className="existing-thread-heading">
-          <span className="existing-thread-path" title={metadata.thread.path}>{metadata.thread.path}</span>
+          <span className="existing-thread-path" title={metadata.thread.path}>{metadata.thread.path === "/PATCHSET_LEVEL" ? "Patchset-level comment" : metadata.thread.path}</span>
           <strong>{metadata.thread.comments.length === 1 ? "Review comment" : `${metadata.thread.comments.length} comment discussion`}</strong>
           {metadata.textRange && <span className="comment-text-range">{textRangeLabel(metadata.textRange)}</span>}
         </span>
@@ -426,11 +434,11 @@ function ExistingDiscussion({ annotation, itemId, expanded, pendingReply, onTogg
 
 function DiscussionSidebar({ threads, revisionNumber, onSelect, onPatchsetSelect }: { threads: DiscussionThread[]; revisionNumber: number; onSelect(thread: DiscussionThread): void; onPatchsetSelect(patchset: number): void }) {
   if (!threads.length) return <div className="discussion-empty"><MessageSquare size={20} /><strong>No discussion yet</strong><span>Published Gerrit comments will appear here.</span></div>;
-  const current = threads.filter((thread) => Boolean(threadAnchor(thread, revisionNumber)));
-  const other = threads.filter((thread) => !threadAnchor(thread, revisionNumber));
+  const current = threads.filter((thread) => threadBelongsToPatchset(thread, revisionNumber));
+  const other = threads.filter((thread) => !threadBelongsToPatchset(thread, revisionNumber));
   const renderThread = (thread: DiscussionThread, historical: boolean) => {
     const latest = thread.comments.at(-1);
-    const patchset = latest?.patchSet ?? thread.comments[0]?.patchSet ?? revisionNumber;
+    const patchset = threadPatchset(thread) ?? latest?.patchSet ?? revisionNumber;
     return (
       <button className={latest?.unresolved ? "sidebar-thread-unresolved" : "sidebar-thread-resolved"} key={thread.id} onClick={() => historical ? onPatchsetSelect(patchset) : onSelect(thread)}>
         <span className="discussion-path">{thread.path === "/PATCHSET_LEVEL" ? "Patchset-level comment" : thread.path}</span>
@@ -516,6 +524,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   const [pendingReplies, setPendingReplies] = useState<PendingReply[]>([]);
   const [localReviewComments, setLocalReviewComments] = useState<LocalReviewComment[]>([]);
   const [activeThreadKey, setActiveThreadKey] = useState<string | null>(null);
+  const [patchsetDiscussionsOpen, setPatchsetDiscussionsOpen] = useState(false);
   const [publishOpen, setPublishOpen] = useState(false);
   const [sshUser, setSshUser] = useState("");
   const [sshHost, setSshHost] = useState(data.host);
@@ -545,7 +554,9 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     });
   }, [data.baseRevisionNumber, data.changeNumber, data.comparisonFiles, data.host, data.patch, data.revision, data.revisionNumber]);
   const [discussionThreads, setDiscussionThreads] = useState(() => buildDiscussionThreads(data.comments));
-  const currentDiscussionCount = discussionThreads.filter((thread) => Boolean(threadAnchor(thread, data.revisionNumber))).length;
+  const currentDiscussionCount = discussionThreads.filter((thread) => threadBelongsToPatchset(thread, data.revisionNumber)).length;
+  const patchsetLevelThreads = discussionThreads.filter((thread) => thread.path === "/PATCHSET_LEVEL" && threadPatchset(thread) === data.revisionNumber);
+  const unresolvedPatchsetDiscussionCount = patchsetLevelThreads.filter((thread) => thread.comments.at(-1)?.unresolved).length;
   const initialItems = useMemo<CodeViewItem<CommentMetadata>[]>(
     () => [
       ...(commitMessageContent ? [{
@@ -831,6 +842,29 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   const addDiscussionReply = useCallback((itemId: string, key: string, message: string, resolved: boolean) => {
     const timestamp = new Date().toISOString();
     let updatedThread: DiscussionThread | undefined;
+    const patchsetThread = itemId.startsWith("patchset-level:")
+      ? discussionThreads.find((thread) => `gerrit:${thread.id}` === key)
+      : undefined;
+    if (patchsetThread) {
+      const latest = patchsetThread.comments.at(-1);
+      const anchor = patchsetThread.comments[0];
+      if (!latest || !anchor) return;
+      const reply: GerritComment = {
+        id: `local-reply-${nextCommentRef.current++}`,
+        path: "/PATCHSET_LEVEL",
+        patchSet: data.revisionNumber,
+        side: "REVISION",
+        author: { name: "You" },
+        message,
+        updated: timestamp,
+        unresolved: !resolved,
+        inReplyTo: latest.id,
+      };
+      updatedThread = { ...patchsetThread, comments: [...patchsetThread.comments, reply] };
+      setDiscussionThreads((threads) => threads.map((thread) => thread.id === updatedThread?.id ? updatedThread : thread));
+      setCommentCount((count) => count + 1);
+      return;
+    }
     updateCommentItem(itemId, (item) => {
       item.annotations = item.annotations?.map((annotation) => {
         const metadata = annotation.metadata;
@@ -861,7 +895,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
       setDiscussionThreads((threads) => threads.map((thread) => thread.id === nextThread.id ? nextThread : thread));
       setCommentCount((count) => count + 1);
     }
-  }, [data.revisionNumber, updateCommentItem]);
+  }, [data.revisionNumber, discussionThreads, updateCommentItem]);
 
   const savePendingReply = useCallback((reply: PendingReply) => {
     setPendingReplies((current) => [...current.filter((entry) => entry.key !== reply.key), reply]);
@@ -991,6 +1025,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     const anchor = threadAnchor(thread, data.revisionNumber);
     const path = anchor?.path ?? thread.path;
     const itemId = path === "/COMMIT_MSG" ? "commit-message" : pathToChangedId.get(path);
+    setPatchsetDiscussionsOpen(false);
     setActiveThreadKey(`gerrit:${thread.id}`);
     if (!itemId) return;
     if (!anchor) {
@@ -1067,8 +1102,10 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
         }
     : undefined;
 
+  const discussionPanelVisible = patchsetDiscussionsOpen || Boolean(activeAnnotation && activeItemId);
+
   return (
-    <div className={`review-layout${sidebarCollapsed ? " sidebar-collapsed" : ""}${activeAnnotation && activeItemId ? " with-discussion-panel" : ""}`}>
+    <div className={`review-layout${sidebarCollapsed ? " sidebar-collapsed" : ""}${discussionPanelVisible ? " with-discussion-panel" : ""}`}>
       <aside className={`sidebar pierre-sidebar${sidebarCollapsed ? " is-collapsed" : ""}`}>
         <button type="button" className="sidebar-collapse-toggle" onClick={() => setSidebarCollapsed((current) => !current)} aria-label={sidebarCollapsed ? "Expand file browser" : "Collapse file browser"} title={sidebarCollapsed ? "Expand file browser" : "Collapse file browser"}>
           {sidebarCollapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
@@ -1119,6 +1156,22 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
                 {data.revisions.filter((revision) => revision.number !== data.revisionNumber).map((revision) => <option key={revision.revision} value={revision.number}>{revision.number}</option>)}
               </select>
             </div>
+            {patchsetLevelThreads.length > 0 && (
+              <button
+                type="button"
+                className={`patchset-discussions-button${unresolvedPatchsetDiscussionCount > 0 ? " has-unresolved" : ""}`}
+                aria-expanded={patchsetDiscussionsOpen}
+                title={`${patchsetLevelThreads.length} patchset-level discussion${patchsetLevelThreads.length === 1 ? "" : "s"}${unresolvedPatchsetDiscussionCount ? `, ${unresolvedPatchsetDiscussionCount} unresolved` : ""}`}
+                onClick={() => {
+                  setActiveThreadKey(null);
+                  setPatchsetDiscussionsOpen((open) => !open);
+                }}
+              >
+                <MessageSquare size={12} />
+                <span>{patchsetLevelThreads.length} patchset discussion{patchsetLevelThreads.length === 1 ? "" : "s"}</span>
+                {unresolvedPatchsetDiscussionCount > 0 && <b>{unresolvedPatchsetDiscussionCount} unresolved</b>}
+              </button>
+            )}
           </div>
         </div>
         {repositoryError && <div className="repository-error"><X size={13} /> <span>{repositoryError}</span><button onClick={() => setRepositoryError("")} aria-label="Dismiss"><X size={12} /></button></div>}
@@ -1170,22 +1223,45 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
         )}
       </section>
 
-      {activeAnnotation && activeItemId && (
-        <aside className="discussion-panel" aria-label="Selected discussion">
+      {discussionPanelVisible && (
+        <aside className="discussion-panel" aria-label={patchsetDiscussionsOpen ? "Patchset discussions" : "Selected discussion"}>
           <div className="discussion-panel-head">
-            <div><span>Discussion</span><strong>{activeThread?.comments.length ?? 0} comment{activeThread?.comments.length === 1 ? "" : "s"}</strong></div>
-            <button type="button" onClick={() => setActiveThreadKey(null)} aria-label="Close discussion panel"><X size={15} /></button>
+            <div>
+              <span>{patchsetDiscussionsOpen ? "Patchset discussions" : "Discussion"}</span>
+              <strong>{patchsetDiscussionsOpen ? `${patchsetLevelThreads.length} thread${patchsetLevelThreads.length === 1 ? "" : "s"}` : `${activeThread?.comments.length ?? 0} comment${activeThread?.comments.length === 1 ? "" : "s"}`}</strong>
+            </div>
+            <button type="button" onClick={() => { setPatchsetDiscussionsOpen(false); setActiveThreadKey(null); }} aria-label="Close discussion panel"><X size={15} /></button>
           </div>
-          <div className="discussion-panel-body">
-            <ExistingDiscussion
-              annotation={activeAnnotation}
-              itemId={activeItemId}
-              expanded
-              pendingReply={pendingReplies.find((reply) => reply.key === activeThreadKey)}
-              onToggle={() => setActiveThreadKey(null)}
-              onSaveDraft={savePendingReply}
-              onDeleteDraft={deletePendingReply}
-            />
+          <div className={`discussion-panel-body${patchsetDiscussionsOpen ? " patchset-discussion-list" : ""}`}>
+            {patchsetDiscussionsOpen ? patchsetLevelThreads.map((thread) => {
+              const range = commentRange(thread.comments[0]);
+              const annotation: LineAnnotation<CommentMetadata> = {
+                lineNumber: 0,
+                metadata: { kind: "existing", key: `gerrit:${thread.id}`, range, thread },
+              };
+              return (
+                <ExistingDiscussion
+                  key={thread.id}
+                  annotation={annotation}
+                  itemId={`patchset-level:${thread.id}`}
+                  expanded
+                  pendingReply={pendingReplies.find((reply) => reply.key === `gerrit:${thread.id}`)}
+                  onToggle={() => undefined}
+                  onSaveDraft={savePendingReply}
+                  onDeleteDraft={deletePendingReply}
+                />
+              );
+            }) : activeAnnotation && activeItemId ? (
+              <ExistingDiscussion
+                annotation={activeAnnotation}
+                itemId={activeItemId}
+                expanded
+                pendingReply={pendingReplies.find((reply) => reply.key === activeThreadKey)}
+                onToggle={() => setActiveThreadKey(null)}
+                onSaveDraft={savePendingReply}
+                onDeleteDraft={deletePendingReply}
+              />
+            ) : null}
           </div>
         </aside>
       )}

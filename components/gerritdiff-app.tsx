@@ -1,20 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
-import {
-  ArrowRight,
-  Check,
-  Code2,
-  ExternalLink,
-  FileCode2,
-  GitBranch,
-  LoaderCircle,
-  Moon,
-  Search,
-  Sun,
-  Zap,
-} from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { ArrowRight, ExternalLink, LoaderCircle, Moon, Search, Sun, X } from "lucide-react";
 import { ChangeReview } from "@/components/change-review";
 import { setGerritDiffTheme, useGerritDiffTheme } from "@/lib/theme";
 import type { ChangeData } from "@/lib/types";
@@ -32,11 +20,17 @@ const EXAMPLES = [
 
 function Logo() {
   return (
-    <div className="brand">
-      <span className="logo-mark"><span /></span>
-      <span>gerritdiff</span>
-      <span className="beta">beta</span>
-    </div>
+    <span className="brand">
+      <svg className="logo-mark" viewBox="0 0 16 16" aria-hidden="true">
+        <rect x="0" y="2" width="7" height="2.5" rx="1" className="lm-del" />
+        <rect x="0" y="6.75" width="7" height="2.5" rx="1" opacity=".35" />
+        <rect x="0" y="11.5" width="7" height="2.5" rx="1" opacity=".35" />
+        <rect x="9" y="2" width="7" height="2.5" rx="1" opacity=".35" />
+        <rect x="9" y="6.75" width="7" height="2.5" rx="1" className="lm-add" />
+        <rect x="9" y="11.5" width="7" height="2.5" rx="1" opacity=".35" />
+      </svg>
+      <span>gerrit<b>diff</b></span>
+    </span>
   );
 }
 
@@ -53,73 +47,71 @@ function ThemeButton() {
   );
 }
 
-function UrlForm({ initial = "", compact = false, submitLabel }: { initial?: string; compact?: boolean; submitLabel?: string }) {
-  const router = useRouter();
+function UrlForm({ initial = "", compact = false }: { initial?: string; compact?: boolean }) {
   const [value, setValue] = useState(initial);
+  const input = useRef<HTMLInputElement>(null);
 
   function submit(event: { preventDefault(): void }) {
     event.preventDefault();
     const url = value.trim();
-    if (url) router.push(`/?url=${encodeURIComponent(url)}`);
+    if (!url) return input.current?.focus();
+    window.location.assign(`/?url=${encodeURIComponent(url)}`);
+  }
+
+  function clear() {
+    setValue("");
+    input.current?.focus();
   }
 
   return (
     <form className={compact ? "url-form compact" : "url-form"} onSubmit={submit}>
       <div className="url-icon"><Search size={18} /></div>
       <input
+        ref={input}
         value={value}
         onChange={(event) => setValue(event.target.value)}
         placeholder="Paste a Gerrit change URL…"
         aria-label="Gerrit change URL"
         spellCheck={false}
       />
-      <button type="submit" aria-label="Open change">
-        <span>{submitLabel ?? (compact ? "Open" : "View change")}</span><ArrowRight size={17} />
+      {value && (
+        <button type="button" className="url-clear" aria-label="Clear URL" onClick={clear}>
+          <X size={15} />
+        </button>
+      )}
+      <button type="submit" className="url-submit" aria-label="Open change" data-empty={!value.trim() || undefined}>
+        <ArrowRight size={16} />
       </button>
     </form>
   );
 }
 
 function Landing() {
-  const router = useRouter();
   return (
     <main className="landing">
-      <div className="ambient ambient-one" />
-      <div className="ambient ambient-two" />
       <nav className="nav shell">
         <Logo />
-        <div className="nav-actions">
-          <a href="https://www.gerritcodereview.com/" aria-label="Gerrit Code Review"><Code2 size={18} /></a>
-          <ThemeButton />
-        </div>
+        <div className="nav-actions"><ThemeButton /></div>
       </nav>
 
       <section className="hero shell">
-        <div className="eyebrow"><Zap size={14} fill="currentColor" /> Built for Gerrit power users</div>
-        <h1>The Gerrit diff viewer<br /><em>you&apos;ll actually enjoy.</em></h1>
-        <p className="hero-copy">Fast, focused, and made for reviewing code. Paste any public Gerrit change and get a clean, distraction-free diff.</p>
+        <h1>Read Gerrit changes, faster.</h1>
+        <p className="hero-copy">Paste a public Gerrit change URL for a side-by-side diff, file tree, and inline discussions.</p>
         <UrlForm />
-        <p className="privacy"><Check size={13} /> No sign-in. No tracking. Public changes only.</p>
 
         <div className="examples">
-          <span>Or try an example</span>
+          <span>Try</span>
           {EXAMPLES.map((example) => (
-            <button key={example.url} onClick={() => router.push(`/?url=${encodeURIComponent(example.url)}`)}>
-              <FileCode2 size={14} /> {example.label} <ArrowRight size={13} />
+            <button key={example.url} onClick={() => window.location.assign(`/?url=${encodeURIComponent(example.url)}`)}>
+              {example.label}
             </button>
           ))}
         </div>
       </section>
 
-      <section className="feature-strip shell">
-        <div><span className="feature-icon violet"><Zap size={18} /></span><p><strong>Instant</strong><small>Streams straight from Gerrit</small></p></div>
-        <div><span className="feature-icon green"><Code2 size={18} /></span><p><strong>Focused</strong><small>Code first, clutter nowhere</small></p></div>
-        <div><span className="feature-icon blue"><GitBranch size={18} /></span><p><strong>Universal</strong><small>Works with any public Gerrit</small></p></div>
-      </section>
-
       <footer className="footer shell">
-        <span>Built for people who review code.</span>
-        <span>GerritDiff is not affiliated with Gerrit.</span>
+        <span>No sign-in · public changes only · not affiliated with Gerrit</span>
+        <a href="https://www.gerritcodereview.com/">gerritcodereview.com</a>
       </footer>
     </main>
   );
@@ -186,7 +178,7 @@ function ChangeLoader({ url, base }: { url: string; base?: string }) {
         <span>!</span>
         <h1>Couldn&apos;t load this change</h1>
         <p className="state-guidance">Check the Gerrit URL, try again, or paste a different change below.</p>
-        <UrlForm initial={url} submitLabel="Open URL" />
+        <UrlForm initial={url} />
         <div className="state-actions">
           <button type="button" onClick={() => { setError(""); setAttempt((current) => current + 1); }}>Try again</button>
           <button type="button" className="secondary" onClick={() => window.location.assign("/")}>Start over</button>

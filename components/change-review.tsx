@@ -81,6 +81,37 @@ function isDiffItem(item: CodeViewItem<CommentMetadata>): item is CodeViewDiffIt
   return item.type === "diff";
 }
 
+type ProjectUiSettings = {
+  tabSize?: number;
+  diffStyle?: "split" | "unified";
+  showWhitespace?: boolean;
+  sidebarCollapsed?: boolean;
+  sidebarMode?: "changed" | "repository" | "discussion";
+  rightPanelOpen?: boolean;
+};
+
+function projectUiStorageKey(host: string, project: string) {
+  return `gerritdiff:ui:${host}:${project}`;
+}
+
+function readProjectUiSettings(host: string, project: string): ProjectUiSettings {
+  try {
+    const settings: unknown = JSON.parse(window.localStorage.getItem(projectUiStorageKey(host, project)) ?? "{}");
+    return settings && typeof settings === "object" ? settings as ProjectUiSettings : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveProjectUiSettings(host: string, project: string, update: Partial<ProjectUiSettings>) {
+  try {
+    const settings = { ...readProjectUiSettings(host, project), ...update };
+    window.localStorage.setItem(projectUiStorageKey(host, project), JSON.stringify(settings));
+  } catch {
+    // Storage may be unavailable in privacy-restricted browser contexts.
+  }
+}
+
 function updateWhitespaceMarkers(root: HTMLElement | ShadowRoot, visible: boolean) {
   const markerRoot = root instanceof ShadowRoot ? root.host : root;
   markerRoot.toggleAttribute("data-show-whitespace", visible);
@@ -674,13 +705,29 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   );
 
   useEffect(() => {
+    const settings = readProjectUiSettings(data.host, data.project);
+    const frame = requestAnimationFrame(() => {
+      setTabSize(settings.tabSize === 4 || settings.tabSize === 8 ? settings.tabSize : 2);
+      setShowWhitespace(settings.showWhitespace ?? false);
+      setSidebarCollapsed(settings.sidebarCollapsed ?? false);
+      if (settings.sidebarMode === "repository" || settings.sidebarMode === "discussion") setSidebarMode(settings.sidebarMode);
+      else setSidebarMode("changed");
+      setRelationPanelOpen(settings.rightPanelOpen ?? data.relationChain.length > 1);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [data.host, data.project, data.relationChain.length]);
+
+  useEffect(() => {
     const mediaQuery = window.matchMedia("(max-width: 767px)");
-    const updateForViewport = (matches: boolean) => setDiffStyle(matches ? "unified" : "split");
+    const updateForViewport = (matches: boolean) => {
+      const preferred = readProjectUiSettings(data.host, data.project).diffStyle;
+      setDiffStyle(matches ? "unified" : preferred === "unified" ? "unified" : "split");
+    };
     const handleChange = (event: MediaQueryListEvent) => updateForViewport(event.matches);
     updateForViewport(mediaQuery.matches);
     mediaQuery.addEventListener("change", handleChange);
     return () => mediaQuery.removeEventListener("change", handleChange);
-  }, []);
+  }, [data.host, data.project]);
 
   const refreshCommentHighlights = useCallback(() => {
     const registry = (CSS as unknown as { highlights?: { set(name: string, highlight: unknown): void; delete(name: string): void } }).highlights;
@@ -1002,8 +1049,12 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   }, []);
 
   const toggleActiveDiscussion = useCallback((key: string) => {
-    setActiveThreadKey((current) => current === key ? null : key);
-  }, []);
+    setActiveThreadKey((current) => {
+      const next = current === key ? null : key;
+      saveProjectUiSettings(data.host, data.project, { rightPanelOpen: Boolean(next) });
+      return next;
+    });
+  }, [data.host, data.project]);
 
   const pendingReplyComments = useMemo<LocalReviewComment[]>(() => pendingReplies.flatMap((reply) => {
     const thread = discussionThreads.find((candidate) => `gerrit:${candidate.id}` === reply.key);
@@ -1124,6 +1175,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     const itemId = path === "/COMMIT_MSG" ? "commit-message" : pathToChangedId.get(path);
     setPatchsetDiscussionsOpen(false);
     setActiveThreadKey(`gerrit:${thread.id}`);
+    saveProjectUiSettings(data.host, data.project, { rightPanelOpen: true });
     if (!itemId) return;
     if (!anchor) {
       scrollToItem(itemId);
@@ -1133,7 +1185,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     const range = commentRange(anchor);
     setSelectedLines(anchor.range ? null : { id: itemId, range });
     viewerRef.current?.scrollTo({ type: "range", id: itemId, range, align: "center", behavior: "smooth" });
-  }, [data.revisionNumber, loadFullDiff, pathToChangedId, scrollToItem]);
+  }, [data.host, data.project, data.revisionNumber, loadFullDiff, pathToChangedId, scrollToItem]);
 
   const openRepositoryFile = useCallback(async (path: string) => {
     const changedId = pathToChangedId.get(path);
@@ -1205,13 +1257,13 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   return (
     <div className={`review-layout${sidebarCollapsed ? " sidebar-collapsed" : ""}${sidePanelVisible ? " with-discussion-panel" : ""}`}>
       <aside className={`sidebar pierre-sidebar${sidebarCollapsed ? " is-collapsed" : ""}`}>
-        <button type="button" className="sidebar-collapse-toggle" onClick={() => setSidebarCollapsed((current) => !current)} aria-label={sidebarCollapsed ? "Expand file browser" : "Collapse file browser"} title={sidebarCollapsed ? "Expand file browser" : "Collapse file browser"}>
+        <button type="button" className="sidebar-collapse-toggle" onClick={() => setSidebarCollapsed((current) => { const next = !current; saveProjectUiSettings(data.host, data.project, { sidebarCollapsed: next }); return next; })} aria-label={sidebarCollapsed ? "Expand file browser" : "Collapse file browser"} title={sidebarCollapsed ? "Expand file browser" : "Collapse file browser"}>
           {sidebarCollapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
         </button>
         <div className="sidebar-tabs">
-          <button className={sidebarMode === "changed" ? "active" : ""} onClick={() => setSidebarMode("changed")}>Changed <b>{files.length}</b></button>
-          <button className={sidebarMode === "repository" ? "active" : ""} onClick={() => setSidebarMode("repository")}>Repository</button>
-          <button className={sidebarMode === "discussion" ? "active" : ""} onClick={() => setSidebarMode("discussion")} title={`${currentDiscussionCount} on this patchset, ${discussionThreads.length} total`}>Discussion <b>{currentDiscussionCount}/{discussionThreads.length}</b></button>
+          <button className={sidebarMode === "changed" ? "active" : ""} onClick={() => { setSidebarMode("changed"); saveProjectUiSettings(data.host, data.project, { sidebarMode: "changed" }); }}>Changed <b>{files.length}</b></button>
+          <button className={sidebarMode === "repository" ? "active" : ""} onClick={() => { setSidebarMode("repository"); saveProjectUiSettings(data.host, data.project, { sidebarMode: "repository" }); }}>Repository</button>
+          <button className={sidebarMode === "discussion" ? "active" : ""} onClick={() => { setSidebarMode("discussion"); saveProjectUiSettings(data.host, data.project, { sidebarMode: "discussion" }); }} title={`${currentDiscussionCount} on this patchset, ${discussionThreads.length} total`}>Discussion <b>{currentDiscussionCount}/{discussionThreads.length}</b></button>
         </div>
         {sidebarMode === "changed" && <ReviewFileTree files={files} onSelect={scrollToItem} />}
         {sidebarMode === "repository" && <RepositoryBrowser changedFiles={files} sourceUrl={data.sourceUrl} onOpenFile={openRepositoryFile} />}
@@ -1262,7 +1314,11 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
               onClick={() => {
                 setPatchsetDiscussionsOpen(false);
                 setActiveThreadKey(null);
-                setRelationPanelOpen((open) => !open);
+                setRelationPanelOpen((open) => {
+                  const next = !open;
+                  saveProjectUiSettings(data.host, data.project, { rightPanelOpen: next });
+                  return next;
+                });
               }}
             >
               <GitBranch size={12} />
@@ -1278,7 +1334,11 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
                 onClick={() => {
                   setRelationPanelOpen(false);
                   setActiveThreadKey(null);
-                  setPatchsetDiscussionsOpen((open) => !open);
+                  setPatchsetDiscussionsOpen((open) => {
+                    const next = !open;
+                    saveProjectUiSettings(data.host, data.project, { rightPanelOpen: next });
+                    return next;
+                  });
                 }}
               >
                 <MessageSquare size={12} />
@@ -1305,14 +1365,22 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
             title={showWhitespace ? "Hide whitespace characters" : "Show spaces and tabs"}
             aria-label={showWhitespace ? "Hide whitespace characters" : "Show spaces and tabs"}
             aria-pressed={showWhitespace}
-            onClick={() => setShowWhitespace((current) => !current)}
+            onClick={() => setShowWhitespace((current) => { const next = !current; saveProjectUiSettings(data.host, data.project, { showWhitespace: next }); return next; })}
           >
             <Pilcrow size={14} />
             <span>Whitespace</span>
           </button>
           <label className="tab-size-setting">
             <span>Tab size</span>
-            <select aria-label="Tab size" value={tabSize} onChange={(event) => setTabSize(Number(event.target.value))}>
+            <select
+              aria-label="Tab size"
+              value={tabSize}
+              onChange={(event) => {
+                const nextTabSize = Number(event.target.value);
+                setTabSize(nextTabSize);
+                saveProjectUiSettings(data.host, data.project, { tabSize: nextTabSize });
+              }}
+            >
               <option value={2}>2</option>
               <option value={4}>4</option>
               <option value={8}>8</option>
@@ -1323,7 +1391,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
             className="diff-style-toggle"
             title={diffStyle === "split" ? "Switch to unified view" : "Switch to side-by-side view"}
             aria-label={diffStyle === "split" ? "Switch to unified view" : "Switch to side-by-side view"}
-            onClick={() => setDiffStyle((current) => current === "split" ? "unified" : "split")}
+            onClick={() => setDiffStyle((current) => { const next = current === "split" ? "unified" : "split"; saveProjectUiSettings(data.host, data.project, { diffStyle: next }); return next; })}
           >
             {diffStyle === "split" ? <Columns2 size={14} /> : <Rows3 size={14} />}
             <span>{diffStyle === "split" ? "Side by side" : "Unified"}</span>
@@ -1365,7 +1433,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
               <span>{relationPanelOpen ? "Relation chain" : patchsetDiscussionsOpen ? "Patchset discussions" : "Discussion"}</span>
               <strong>{relationPanelOpen ? `${data.relationChain.length} change${data.relationChain.length === 1 ? "" : "s"}` : patchsetDiscussionsOpen ? `${patchsetLevelThreads.length} thread${patchsetLevelThreads.length === 1 ? "" : "s"}` : `${activeThread?.comments.length ?? 0} comment${activeThread?.comments.length === 1 ? "" : "s"}`}</strong>
             </div>
-            <button type="button" onClick={() => { setRelationPanelOpen(false); setPatchsetDiscussionsOpen(false); setActiveThreadKey(null); }} aria-label="Close side panel"><X size={15} /></button>
+            <button type="button" onClick={() => { setRelationPanelOpen(false); setPatchsetDiscussionsOpen(false); setActiveThreadKey(null); saveProjectUiSettings(data.host, data.project, { rightPanelOpen: false }); }} aria-label="Close side panel"><X size={15} /></button>
           </div>
           <div className={`discussion-panel-body${patchsetDiscussionsOpen && !relationPanelOpen ? " patchset-discussion-list" : ""}`}>
             {relationPanelOpen ? <RelationChainPanel relations={data.relationChain} /> : patchsetDiscussionsOpen ? patchsetLevelThreads.map((thread) => {

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { parseGerritJson, publicFetch, resolveChange } from "@/lib/gerrit-server";
-import type { ChangeData, ComparisonFile, GerritComment } from "@/lib/types";
+import type { ChangeData, ComparisonFile, GerritComment, RelatedChange } from "@/lib/types";
 
 export const runtime = "nodejs";
 
@@ -26,6 +26,15 @@ type GerritFileInfo = {
   lines_deleted?: number;
 };
 type GerritFiles = Record<string, GerritFileInfo>;
+type GerritRelatedChange = {
+  project: string;
+  commit: { commit: string; subject?: string };
+  _change_number?: number;
+  _revision_number?: number;
+  _current_revision_number?: number;
+  status?: string;
+};
+type GerritRelatedChanges = { changes: GerritRelatedChange[] };
 
 async function fetchRevisionContent(changePath: string, revision: string | number, path: string) {
   const response = await publicFetch(`${changePath}/revisions/${encodeURIComponent(revision)}/files/${encodeURIComponent(path)}/content`, "text/plain", true);
@@ -140,12 +149,13 @@ export async function GET(request: NextRequest) {
     }
     const changePath = `${parsed.origin}/changes/${encodeURIComponent(parsed.change)}`;
     const revisionPath = `${changePath}/revisions/${encodeURIComponent(revision)}`;
-    const [patchResponse, comparison, fileStats, commentsResponse, portedCommentsResponse] = await Promise.all([
+    const [patchResponse, comparison, fileStats, commentsResponse, portedCommentsResponse, relatedResponse] = await Promise.all([
       baseRevisionNumber === undefined ? publicFetch(`${revisionPath}/patch`, "text/plain") : Promise.resolve(null),
       baseRevisionNumber === undefined ? Promise.resolve(undefined) : fetchComparison(changePath, revision, baseRevisionNumber),
       baseRevisionNumber === undefined ? fetchFileStats(revisionPath) : Promise.resolve(undefined),
       fetchOptionalComments(`${changePath}/comments?enable-context=true&context-padding=0`),
       fetchOptionalComments(`${revisionPath}/ported_comments`),
+      fetchOptionalComments(`${revisionPath}/related`),
     ]);
     let patch = "";
     if (patchResponse) {
@@ -170,6 +180,41 @@ export async function GET(request: NextRequest) {
         unresolved: original?.unresolved ?? comment.unresolved,
       });
     }
+
+    const relatedChanges = relatedResponse
+      ? parseGerritJson<GerritRelatedChanges>(await relatedResponse.text()).changes
+      : [];
+    const relationChain: RelatedChange[] = relatedChanges.map((related) => {
+      const changeNumber = related._change_number;
+      const revisionNumber = related._revision_number;
+      const sourceUrl = changeNumber
+        ? `${parsed.origin}/c/${related.project.split("/").map(encodeURIComponent).join("/")}/+/${changeNumber}${revisionNumber ? `/${revisionNumber}` : ""}`
+        : undefined;
+      return {
+        project: related.project,
+        changeNumber,
+        revisionNumber,
+        currentRevisionNumber: related._current_revision_number,
+        subject: related.commit.subject?.trim() || (changeNumber ? `Change ${changeNumber}` : related.commit.commit.slice(0, 12)),
+        status: related.status,
+        commit: related.commit.commit,
+        sourceUrl,
+        isCurrent: false,
+      };
+    });
+    const currentRelationIndex = relationChain.findIndex((related) => related.changeNumber === detail._number && related.revisionNumber === revisionNumber);
+    if (currentRelationIndex >= 0) relationChain[currentRelationIndex] = { ...relationChain[currentRelationIndex], isCurrent: true };
+    else relationChain.push({
+      project: detail.project,
+      changeNumber: detail._number,
+      revisionNumber,
+      currentRevisionNumber: Math.max(...Object.values(detail.revisions).map((item) => item._number)),
+      subject: commitSubject,
+      status: detail.status,
+      commit: revision,
+      sourceUrl,
+      isCurrent: true,
+    });
 
     const avatar = detail.owner.avatars?.toSorted((a, b) => b.height - a.height)[0]?.url;
     const avatarUrl = avatar ? new URL(avatar, parsed.origin).toString() : undefined;
@@ -204,6 +249,7 @@ export async function GET(request: NextRequest) {
       deletions: comparison?.deletions ?? fileStats?.deletions ?? detail.deletions ?? 0,
       patch,
       comments: [...commentsById.values()].toSorted((a, b) => a.updated.localeCompare(b.updated)),
+      relationChain,
     };
 
     return NextResponse.json(data, { headers: { "Cache-Control": "public, s-maxage=60, stale-while-revalidate=300" } });

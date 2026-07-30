@@ -20,7 +20,7 @@ import { FileTree, useFileTree } from "@pierre/trees/react";
 import { Check, ChevronDown, CircleCheck, Columns2, Copy, FileText, GitBranch, LoaderCircle, MessageSquare, PanelLeftClose, PanelLeftOpen, Quote, Reply, Rows3, Send, Terminal, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RepositoryBrowser } from "@/components/repository-browser";
-import type { ChangeData, GerritComment } from "@/lib/types";
+import type { ChangeData, GerritComment, RelatedChange } from "@/lib/types";
 import type { GerritDiffTheme } from "@/lib/theme";
 
 type DiscussionThread = { id: string; path: string; comments: GerritComment[] };
@@ -469,6 +469,36 @@ function DiscussionSidebar({ threads, revisionNumber, onSelect, onPatchsetSelect
   );
 }
 
+function RelationChainPanel({ relations }: { relations: RelatedChange[] }) {
+  return (
+    <div className="relation-chain-list">
+      {relations.map((relation, index) => {
+        const label = relation.changeNumber ? `Change ${relation.changeNumber}` : relation.commit.slice(0, 12);
+        const revision = relation.revisionNumber ? `PS${relation.revisionNumber}` : relation.commit.slice(0, 8);
+        const content = (
+          <>
+            <span className="relation-node" aria-hidden="true"><i /></span>
+            <span className="relation-copy">
+              <span className="relation-heading">
+                <strong>{label}</strong>
+                <code>{revision}</code>
+                {relation.revisionNumber && relation.currentRevisionNumber && relation.revisionNumber !== relation.currentRevisionNumber && <em>outdated</em>}
+              </span>
+              <span className="relation-subject">{relation.subject}</span>
+              <span className="relation-meta">{relation.project}{relation.status ? ` · ${relation.status.toLowerCase()}` : ""}</span>
+            </span>
+          </>
+        );
+        return relation.isCurrent || !relation.sourceUrl ? (
+          <div key={`${relation.commit}:${index}`} className={`relation-item${relation.isCurrent ? " is-current" : ""}`} aria-current={relation.isCurrent ? "page" : undefined}>{content}</div>
+        ) : (
+          <a key={`${relation.commit}:${index}`} className="relation-item" href={`/?url=${encodeURIComponent(relation.sourceUrl)}`}>{content}</a>
+        );
+      })}
+    </div>
+  );
+}
+
 function CollapseButton({ collapsed, disabled, onToggle }: { collapsed?: boolean; disabled: boolean; onToggle(): void }) {
   return (
     <button
@@ -536,6 +566,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   const [localReviewComments, setLocalReviewComments] = useState<LocalReviewComment[]>([]);
   const [activeThreadKey, setActiveThreadKey] = useState<string | null>(null);
   const [patchsetDiscussionsOpen, setPatchsetDiscussionsOpen] = useState(false);
+  const [relationPanelOpen, setRelationPanelOpen] = useState(false);
   const [publishOpen, setPublishOpen] = useState(false);
   const [sshUser, setSshUser] = useState("");
   const [sshHost, setSshHost] = useState(data.host);
@@ -1034,6 +1065,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
 
   const selectDiscussion = useCallback(async (thread: DiscussionThread) => {
     const anchor = threadAnchor(thread, data.revisionNumber);
+    setRelationPanelOpen(false);
     const path = anchor?.path ?? thread.path;
     const itemId = path === "/COMMIT_MSG" ? "commit-message" : pathToChangedId.get(path);
     setPatchsetDiscussionsOpen(false);
@@ -1114,9 +1146,10 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     : undefined;
 
   const discussionPanelVisible = patchsetDiscussionsOpen || Boolean(activeAnnotation && activeItemId);
+  const sidePanelVisible = relationPanelOpen || discussionPanelVisible;
 
   return (
-    <div className={`review-layout${sidebarCollapsed ? " sidebar-collapsed" : ""}${discussionPanelVisible ? " with-discussion-panel" : ""}`}>
+    <div className={`review-layout${sidebarCollapsed ? " sidebar-collapsed" : ""}${sidePanelVisible ? " with-discussion-panel" : ""}`}>
       <aside className={`sidebar pierre-sidebar${sidebarCollapsed ? " is-collapsed" : ""}`}>
         <button type="button" className="sidebar-collapse-toggle" onClick={() => setSidebarCollapsed((current) => !current)} aria-label={sidebarCollapsed ? "Expand file browser" : "Collapse file browser"} title={sidebarCollapsed ? "Expand file browser" : "Collapse file browser"}>
           {sidebarCollapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
@@ -1167,6 +1200,21 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
                 {data.revisions.filter((revision) => revision.number !== data.revisionNumber).map((revision) => <option key={revision.revision} value={revision.number}>{revision.number}</option>)}
               </select>
             </div>
+            <button
+              type="button"
+              className="relation-chain-button"
+              aria-expanded={relationPanelOpen}
+              title={`${data.relationChain.length} change${data.relationChain.length === 1 ? "" : "s"} in the relation chain`}
+              onClick={() => {
+                setPatchsetDiscussionsOpen(false);
+                setActiveThreadKey(null);
+                setRelationPanelOpen((open) => !open);
+              }}
+            >
+              <GitBranch size={12} />
+              <span>Relation chain</span>
+              <b>{data.relationChain.length}</b>
+            </button>
             {patchsetLevelThreads.length > 0 && (
               <button
                 type="button"
@@ -1174,6 +1222,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
                 aria-expanded={patchsetDiscussionsOpen}
                 title={`${patchsetLevelThreads.length} patchset-level discussion${patchsetLevelThreads.length === 1 ? "" : "s"}${unresolvedPatchsetDiscussionCount ? `, ${unresolvedPatchsetDiscussionCount} unresolved` : ""}`}
                 onClick={() => {
+                  setRelationPanelOpen(false);
                   setActiveThreadKey(null);
                   setPatchsetDiscussionsOpen((open) => !open);
                 }}
@@ -1236,17 +1285,17 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
         )}
       </section>
 
-      {discussionPanelVisible && (
-        <aside className="discussion-panel" aria-label={patchsetDiscussionsOpen ? "Patchset discussions" : "Selected discussion"}>
+      {sidePanelVisible && (
+        <aside className="discussion-panel" aria-label={relationPanelOpen ? "Relation chain" : patchsetDiscussionsOpen ? "Patchset discussions" : "Selected discussion"}>
           <div className="discussion-panel-head">
             <div>
-              <span>{patchsetDiscussionsOpen ? "Patchset discussions" : "Discussion"}</span>
-              <strong>{patchsetDiscussionsOpen ? `${patchsetLevelThreads.length} thread${patchsetLevelThreads.length === 1 ? "" : "s"}` : `${activeThread?.comments.length ?? 0} comment${activeThread?.comments.length === 1 ? "" : "s"}`}</strong>
+              <span>{relationPanelOpen ? "Relation chain" : patchsetDiscussionsOpen ? "Patchset discussions" : "Discussion"}</span>
+              <strong>{relationPanelOpen ? `${data.relationChain.length} change${data.relationChain.length === 1 ? "" : "s"}` : patchsetDiscussionsOpen ? `${patchsetLevelThreads.length} thread${patchsetLevelThreads.length === 1 ? "" : "s"}` : `${activeThread?.comments.length ?? 0} comment${activeThread?.comments.length === 1 ? "" : "s"}`}</strong>
             </div>
-            <button type="button" onClick={() => { setPatchsetDiscussionsOpen(false); setActiveThreadKey(null); }} aria-label="Close discussion panel"><X size={15} /></button>
+            <button type="button" onClick={() => { setRelationPanelOpen(false); setPatchsetDiscussionsOpen(false); setActiveThreadKey(null); }} aria-label="Close side panel"><X size={15} /></button>
           </div>
-          <div className={`discussion-panel-body${patchsetDiscussionsOpen ? " patchset-discussion-list" : ""}`}>
-            {patchsetDiscussionsOpen ? patchsetLevelThreads.map((thread) => {
+          <div className={`discussion-panel-body${patchsetDiscussionsOpen && !relationPanelOpen ? " patchset-discussion-list" : ""}`}>
+            {relationPanelOpen ? <RelationChainPanel relations={data.relationChain} /> : patchsetDiscussionsOpen ? patchsetLevelThreads.map((thread) => {
               const range = commentRange(thread.comments[0]);
               const annotation: LineAnnotation<CommentMetadata> = {
                 lineNumber: 0,

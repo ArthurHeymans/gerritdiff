@@ -23,6 +23,18 @@ export type ComparisonFile = {
   binary?: boolean;
 };
 
+export type RelatedChange = {
+  project: string;
+  changeNumber?: number;
+  revisionNumber?: number;
+  currentRevisionNumber?: number;
+  subject: string;
+  status?: string;
+  commit: string;
+  sourceUrl?: string;
+  isCurrent: boolean;
+};
+
 export type ChangeData = {
   host: string;
   sourceUrl: string;
@@ -43,4 +55,5 @@ export type ChangeData = {
   deletions: number;
   patch: string;
   comments: GerritComment[];
+  relationChain: RelatedChange[];
 };

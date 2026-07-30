@@ -17,7 +17,7 @@ import {
 import { CodeView, type CodeViewHandle, WorkerPoolContextProvider } from "@pierre/diffs/react";
 import type { GitStatus, GitStatusEntry } from "@pierre/trees";
 import { FileTree, useFileTree } from "@pierre/trees/react";
-import { Check, ChevronDown, CircleCheck, Columns2, Copy, FileText, GitBranch, LoaderCircle, MessageSquare, PanelLeftClose, PanelLeftOpen, Pilcrow, Quote, Reply, Rows3, Send, Settings2, Terminal, Trash2, X } from "lucide-react";
+import { Check, ChevronDown, CircleCheck, Columns2, Copy, FileText, GitBranch, LoaderCircle, MessageSquare, PanelLeftClose, PanelLeftOpen, Pencil, Pilcrow, Quote, Reply, Rows3, Send, Settings2, Terminal, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RepositoryBrowser } from "@/components/repository-browser";
 import type { ChangeData, GerritComment, RelatedChange } from "@/lib/types";
@@ -28,8 +28,8 @@ type DiscussionThread = { id: string; path: string; comments: GerritComment[] };
 type GerritTextRange = { start_line: number; start_character: number; end_line: number; end_character: number };
 
 type CommentMetadata =
-  | { kind: "draft"; key: string; message: string; range: SelectedLineRange; textRange?: GerritTextRange }
-  | { kind: "saved"; key: string; author: string; message: string; range: SelectedLineRange; textRange?: GerritTextRange }
+  | { kind: "draft"; key: string; message: string; range: SelectedLineRange; textRange?: GerritTextRange; unresolved?: boolean }
+  | { kind: "saved"; key: string; author: string; message: string; range: SelectedLineRange; textRange?: GerritTextRange; unresolved?: boolean }
   | { kind: "existing"; key: string; range: SelectedLineRange; textRange?: GerritTextRange; thread: DiscussionThread };
 
 type ActiveDraft = { itemId: string; key: string };
@@ -342,19 +342,20 @@ function DraftComment({
   annotation: DiffLineAnnotation<CommentMetadata> | LineAnnotation<CommentMetadata>;
   itemId: string;
   onCancel(itemId: string, key: string): void;
-  onSave(itemId: string, key: string, message: string): void;
+  onSave(itemId: string, key: string, message: string, unresolved: boolean): void;
 }) {
   const metadata = annotation.metadata?.kind === "draft" ? annotation.metadata : undefined;
   const [message, setMessage] = useState(metadata?.message ?? "");
+  const [unresolved, setUnresolved] = useState(metadata?.unresolved ?? true);
   const key = metadata?.key ?? "";
   const trimmed = message.trim();
 
   return (
     <form
-      className="comment-card comment-draft"
+      className={`comment-card comment-draft ${unresolved ? "thread-unresolved" : "thread-resolved"}`}
       onSubmit={(event) => {
         event.preventDefault();
-        if (trimmed) onSave(itemId, key, trimmed);
+        if (trimmed) onSave(itemId, key, trimmed, unresolved);
       }}
     >
       <div className="comment-avatar">You</div>
@@ -366,15 +367,21 @@ function DraftComment({
           onChange={(event) => setMessage(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Escape") onCancel(itemId, key);
-            if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && trimmed) onSave(itemId, key, trimmed);
+            if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && trimmed) onSave(itemId, key, trimmed, unresolved);
           }}
           placeholder="Add a comment…"
           rows={2}
         />
+        <div className="reply-options">
+          <button className={`resolution-toggle ${unresolved ? "is-unresolved" : "is-resolved"}`} type="button" aria-pressed={!unresolved} onClick={() => setUnresolved((current) => !current)}>
+            <CircleCheck size={12} /> {unresolved ? "Unresolved" : "Resolved"}
+          </button>
+          <span>Unresolved comments block until someone marks them done.</span>
+        </div>
         <div className="comment-actions">
           <span>Ctrl ↵ to submit</span>
           <button type="button" className="comment-cancel" onClick={() => onCancel(itemId, key)}><X size={14} /> Cancel</button>
-          <button type="submit" disabled={!trimmed}><Send size={13} /> Add comment</button>
+          <button type="submit" disabled={!trimmed}><Send size={13} /> {metadata?.message ? "Save comment" : "Add comment"}</button>
         </div>
       </div>
     </form>
@@ -386,22 +393,36 @@ function SavedComment({
   itemId,
   onDelete,
   onSelect,
+  onEdit,
+  onToggleResolved,
 }: {
   annotation: DiffLineAnnotation<CommentMetadata> | LineAnnotation<CommentMetadata>;
   itemId: string;
   onDelete(itemId: string, key: string): void;
   onSelect(selection: CodeViewLineSelection | null): void;
+  onEdit(itemId: string, key: string): void;
+  onToggleResolved(itemId: string, key: string): void;
 }) {
   const metadata = annotation.metadata;
   if (!metadata || metadata.kind !== "saved") return null;
+  const unresolved = metadata.unresolved ?? true;
   return (
-    <div className="comment-card saved-comment" onClick={() => onSelect(metadata.textRange ? null : { id: itemId, range: metadata.range })}>
+    <div className={`comment-card saved-comment ${unresolved ? "thread-unresolved" : "thread-resolved"}`} onClick={() => onSelect(metadata.textRange ? null : { id: itemId, range: metadata.range })}>
       <div className="comment-avatar">{metadata.author.slice(0, 2).toUpperCase()}</div>
       <div className="saved-comment-body">
-        <div><strong>{metadata.author}</strong><span>just now</span>{metadata.textRange && <span className="comment-text-range">{textRangeLabel(metadata.textRange)}</span>}</div>
+        <div>
+          <strong>{metadata.author}</strong>
+          <span>Draft · not published</span>
+          {metadata.textRange && <span className="comment-text-range">{textRangeLabel(metadata.textRange)}</span>}
+          <span className="thread-state">{unresolved ? "Unresolved" : "Resolved"}</span>
+        </div>
         <p>{metadata.message}</p>
+        <div className="discussion-actions" onClick={(event) => event.stopPropagation()}>
+          <button type="button" onClick={() => onEdit(itemId, metadata.key)}><Pencil size={12} /> Edit</button>
+          <button type="button" onClick={() => onToggleResolved(itemId, metadata.key)}><CircleCheck size={12} /> Mark {unresolved ? "resolved" : "unresolved"}</button>
+          <button type="button" onClick={() => onDelete(itemId, metadata.key)}><Trash2 size={12} /> Discard</button>
+        </div>
       </div>
-      <button onClick={(event) => { event.stopPropagation(); onDelete(itemId, metadata.key); }} aria-label="Delete comment"><Trash2 size={14} /></button>
     </div>
   );
 }
@@ -912,22 +933,14 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     setSelectedLines(null);
   }, [updateCommentItem]);
 
-  const saveComment = useCallback((itemId: string, key: string, message: string) => {
+  const saveComment = useCallback((itemId: string, key: string, message: string, unresolved: boolean) => {
     const updated = updateCommentItem(itemId, (item) => {
       if (!item.annotations) return false;
-      if (item.type === "diff") {
-        item.annotations = item.annotations.map((annotation) =>
-          annotation.metadata?.key === key
-            ? { ...annotation, metadata: { ...annotation.metadata, kind: "saved" as const, author: "You", message } }
-            : annotation,
-        );
-      } else {
-        item.annotations = item.annotations.map((annotation) =>
-          annotation.metadata?.key === key
-            ? { ...annotation, metadata: { ...annotation.metadata, kind: "saved" as const, author: "You", message } }
-            : annotation,
-        );
-      }
+      item.annotations = item.annotations.map((annotation) =>
+        annotation.metadata?.key === key
+          ? { ...annotation, metadata: { ...annotation.metadata, kind: "saved" as const, author: "You", message, unresolved } }
+          : annotation,
+      ) as typeof item.annotations;
       return true;
     });
     if (updated) {
@@ -935,11 +948,43 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
       if (saved?.kind === "saved") {
         setLocalReviewComments((comments) => [
           ...comments.filter((comment) => comment.key !== key),
-          { key, path: updated.type === "diff" ? updated.fileDiff.name : updated.id === "commit-message" ? "/COMMIT_MSG" : updated.file.name, message, range: saved.range, textRange: saved.textRange },
+          { key, path: updated.type === "diff" ? updated.fileDiff.name : updated.id === "commit-message" ? "/COMMIT_MSG" : updated.file.name, message, range: saved.range, textRange: saved.textRange, unresolved },
         ]);
       }
       activeDraftRef.current = null;
       setSelectedLines(null);
+    }
+  }, [updateCommentItem]);
+
+  const editComment = useCallback((itemId: string, key: string) => {
+    const updated = updateCommentItem(itemId, (item) => {
+      const target = item.annotations?.find((annotation) => annotation.metadata?.key === key)?.metadata;
+      if (target?.kind !== "saved") return false;
+      item.annotations = item.annotations?.map((annotation) =>
+        annotation.metadata?.key === key
+          ? { ...annotation, metadata: { kind: "draft" as const, key, message: target.message, range: target.range, textRange: target.textRange, unresolved: target.unresolved } }
+          : annotation,
+      ) as typeof item.annotations;
+      return true;
+    });
+    if (updated) activeDraftRef.current = { itemId, key };
+  }, [updateCommentItem]);
+
+  const toggleCommentResolved = useCallback((itemId: string, key: string) => {
+    let next: boolean | undefined;
+    updateCommentItem(itemId, (item) => {
+      const target = item.annotations?.find((annotation) => annotation.metadata?.key === key)?.metadata;
+      if (target?.kind !== "saved") return false;
+      next = !(target.unresolved ?? true);
+      item.annotations = item.annotations?.map((annotation) =>
+        annotation.metadata?.key === key
+          ? { ...annotation, metadata: { ...target, unresolved: next } }
+          : annotation,
+      ) as typeof item.annotations;
+      return true;
+    });
+    if (next !== undefined) {
+      setLocalReviewComments((comments) => comments.map((comment) => comment.key === key ? { ...comment, unresolved: next } : comment));
     }
   }, [updateCommentItem]);
 
@@ -1148,8 +1193,8 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     }
     return annotation.metadata.kind === "draft"
       ? <DraftComment annotation={annotation} itemId={item.id} onCancel={removeComment} onSave={saveComment} />
-      : <SavedComment annotation={annotation} itemId={item.id} onDelete={removeComment} onSelect={toggleCommentSelection} />;
-  }, [deleteLocalReply, localReplies, removeComment, saveComment, saveLocalReply, toggleActiveDiscussion, toggleCommentSelection]);
+      : <SavedComment annotation={annotation} itemId={item.id} onDelete={removeComment} onSelect={toggleCommentSelection} onEdit={editComment} onToggleResolved={toggleCommentResolved} />;
+  }, [deleteLocalReply, editComment, localReplies, removeComment, saveComment, saveLocalReply, toggleActiveDiscussion, toggleCommentResolved, toggleCommentSelection]);
 
   const renderHeaderPrefix = useCallback((item: CodeViewItem<CommentMetadata>) => {
     const disabled = item.type === "diff"

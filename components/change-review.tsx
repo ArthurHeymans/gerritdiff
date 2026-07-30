@@ -39,7 +39,8 @@ type LocalReply = { key: string; message: string; resolved: boolean };
 type LocalReviewComment = { key: string; path: string; message: string; range: SelectedLineRange; textRange?: GerritTextRange; inReplyTo?: string; unresolved?: boolean };
 type CodeTextSelection = { itemId: string; range: SelectedLineRange; textRange: GerritTextRange; top: number; left: number };
 type GerritCommentInput = {
-  side: "PARENT" | "REVISION";
+  // Omitted for /PATCHSET_LEVEL comments; Gerrit defaults to REVISION.
+  side?: "PARENT" | "REVISION";
   line?: number;
   range?: { start_line: number; start_character: number; end_line: number; end_character: number };
   in_reply_to?: string;
@@ -201,6 +202,15 @@ function scopeLabel(path: string) {
   return path === "/PATCHSET_LEVEL" ? "Patchset comments" : path === "/COMMIT_MSG" ? "Commit message comments" : "File comments";
 }
 
+function shiftCommitMessageComment(comment: GerritComment, offset: number): GerritComment {
+  const shift = (line: number) => Math.max(1, line + offset);
+  return {
+    ...comment,
+    line: comment.line ? shift(comment.line) : comment.line,
+    range: comment.range ? { ...comment.range, startLine: shift(comment.range.startLine), endLine: shift(comment.range.endLine) } : undefined,
+  };
+}
+
 function commentRange(comment: GerritComment): SelectedLineRange {
   const side = comment.side === "PARENT" ? "deletions" : "additions";
   return { start: comment.range?.startLine ?? comment.line ?? 0, end: comment.range?.endLine ?? comment.line ?? 0, side, endSide: side };
@@ -273,8 +283,17 @@ function highlightedTextRanges(root: ShadowRoot, textRange: GerritTextRange, sid
   return ranges;
 }
 
-function commentInput(comment: LocalReviewComment, file?: FileDiffMetadata): GerritCommentInput {
+function commentInput(comment: LocalReviewComment, file: FileDiffMetadata | undefined, lineOffset: number): GerritCommentInput {
   const side = comment.range.endSide ?? comment.range.side ?? "additions";
+  // Gerrit rejects a patchset-level comment that carries side, line or range
+  // (CommentsValidator#ensureValidPatchsetLevelComment).
+  if (comment.path === "/PATCHSET_LEVEL") {
+    const patchsetInput: GerritCommentInput = { message: comment.message };
+    if (comment.inReplyTo) patchsetInput.in_reply_to = comment.inReplyTo;
+    if (comment.unresolved !== undefined) patchsetInput.unresolved = comment.unresolved;
+    return patchsetInput;
+  }
+  const offset = comment.path === "/COMMIT_MSG" ? lineOffset : 0;
   const input: GerritCommentInput = {
     side: side === "deletions" ? "PARENT" : "REVISION",
     message: comment.message,
@@ -282,11 +301,13 @@ function commentInput(comment: LocalReviewComment, file?: FileDiffMetadata): Ger
   if (comment.inReplyTo) input.in_reply_to = comment.inReplyTo;
   if (comment.unresolved !== undefined) input.unresolved = comment.unresolved;
   if (comment.textRange) {
-    input.range = comment.textRange;
+    input.range = offset
+      ? { ...comment.textRange, start_line: comment.textRange.start_line + offset, end_line: comment.textRange.end_line + offset }
+      : comment.textRange;
     return input;
   }
   if (comment.range.start === comment.range.end || !file) {
-    if (comment.range.end > 0) input.line = comment.range.end;
+    if (comment.range.end > 0) input.line = comment.range.end + offset;
     return input;
   }
   const hunk = file.hunks.find((candidate) => {
@@ -298,13 +319,13 @@ function commentInput(comment: LocalReviewComment, file?: FileDiffMetadata): Ger
   const lineIndex = hunk ? (side === "deletions" ? hunk.deletionLineIndex : hunk.additionLineIndex) + comment.range.end - start : -1;
   const lineText = side === "deletions" ? file.deletionLines[lineIndex] : file.additionLines[lineIndex];
   if (lineText === undefined) {
-    input.line = comment.range.end;
+    input.line = comment.range.end + offset;
     return input;
   }
   input.range = {
-    start_line: comment.range.start,
+    start_line: comment.range.start + offset,
     start_character: 0,
-    end_line: comment.range.end,
+    end_line: comment.range.end + offset,
     end_character: lineText.length,
   };
   return input;
@@ -329,9 +350,11 @@ function commentLocationLabel(comment: LocalReviewComment) {
   return start && start !== end ? `Lines ${start}–${end} · ${side}` : `Line ${end} · ${side}`;
 }
 
-function reviewCommand(host: string, port: string, user: string, change: number, patchset: number, input: object) {
+function reviewCommand(host: string, port: string, user: string, project: string, change: number, patchset: number, input: object, heredoc = "GERRIT_REVIEW") {
   const destination = `${user.trim() || "YOUR_USERNAME"}@${host}`;
-  return `ssh -p ${shellArg(port.trim() || "29418")} ${shellArg(destination)} gerrit review --json ${change},${patchset} <<'GERRIT_REVIEW'\n${JSON.stringify(input, null, 2)}\nGERRIT_REVIEW`;
+  // --project keeps Gerrit from doing the deprecated (and ambiguous) change-number
+  // lookup across every project; it must precede the CHANGE,PATCHSET argument.
+  return `ssh -p ${shellArg(port.trim() || "29418")} ${shellArg(destination)} gerrit review --project ${shellArg(project)} --json ${change},${patchset} <<'${heredoc}'\n${JSON.stringify(input, null, 2)}\n${heredoc}`;
 }
 
 function DraftComment({
@@ -718,7 +741,14 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
       return [fileDiff];
     });
   }, [data.baseRevisionNumber, data.changeNumber, data.comparisonFiles, data.host, data.patch, data.revision, data.revisionNumber]);
-  const discussionThreads = useMemo(() => buildDiscussionThreads(data.comments), [data.comments]);
+  // Gerrit anchors /COMMIT_MSG comments in its magic file, which prefixes the message with
+  // generated header lines. The viewer shows the bare message, so shift into that frame here
+  // (commentInput shifts back when publishing).
+  const viewComments = useMemo(
+    () => data.comments.map((comment) => comment.path === "/COMMIT_MSG" ? shiftCommitMessageComment(comment, -data.commitMessageLineOffset) : comment),
+    [data.comments, data.commitMessageLineOffset],
+  );
+  const discussionThreads = useMemo(() => buildDiscussionThreads(viewComments), [viewComments]);
   const currentDiscussionCount = discussionThreads.filter((thread) => threadBelongsToPatchset(thread, data.revisionNumber)).length;
   const patchsetLevelThreads = discussionThreads.filter((thread) => thread.path === "/PATCHSET_LEVEL" && threadPatchset(thread) === data.revisionNumber);
   const unresolvedPatchsetDiscussionCount = patchsetLevelThreads.filter((thread) => thread.comments.at(-1)?.unresolved).length;
@@ -1159,16 +1189,30 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
 
   const generatedReview = useMemo(() => {
     const comments: Record<string, GerritCommentInput[]> = {};
+    // When comparing two patchsets, the left-hand side is the base patchset itself, not
+    // the parent commit of the reviewed patchset, so those comments have to be posted
+    // against that patchset with side REVISION.
+    const baseComments: Record<string, GerritCommentInput[]> = {};
     for (const comment of combinedReviewComments) {
       const file = files.find((candidate) => candidate.name === comment.path);
-      comments[comment.path] = [...(comments[comment.path] ?? []), commentInput(comment, file)];
+      const input = commentInput(comment, file, data.commitMessageLineOffset);
+      if (data.baseRevisionNumber !== undefined && input.side === "PARENT") {
+        const path = file?.prevName ?? comment.path;
+        baseComments[path] = [...(baseComments[path] ?? []), { ...input, side: "REVISION" }];
+        continue;
+      }
+      comments[comment.path] = [...(comments[comment.path] ?? []), input];
     }
     const input: { message?: string; labels?: Record<string, number>; comments?: Record<string, GerritCommentInput[]> } = {};
     if (reviewMessage.trim()) input.message = reviewMessage.trim();
     if (codeReview) input.labels = { "Code-Review": Number(codeReview) };
     if (Object.keys(comments).length) input.comments = comments;
-    return reviewCommand(sshHost.trim() || data.host, sshPort, sshUser, data.changeNumber, data.revisionNumber, input);
-  }, [codeReview, combinedReviewComments, data.changeNumber, data.host, data.revisionNumber, files, reviewMessage, sshHost, sshPort, sshUser]);
+    const host = sshHost.trim() || data.host;
+    const command = reviewCommand(host, sshPort, sshUser, data.project, data.changeNumber, data.revisionNumber, input);
+    if (!Object.keys(baseComments).length) return command;
+    const baseCommand = reviewCommand(host, sshPort, sshUser, data.project, data.changeNumber, data.baseRevisionNumber as number, { comments: baseComments }, "GERRIT_REVIEW_BASE");
+    return `${command}\n${baseCommand}`;
+  }, [codeReview, combinedReviewComments, data.baseRevisionNumber, data.changeNumber, data.commitMessageLineOffset, data.host, data.project, data.revisionNumber, files, reviewMessage, sshHost, sshPort, sshUser]);
 
   const copyGeneratedReview = useCallback(async () => {
     await navigator.clipboard.writeText(generatedReview);
@@ -1701,7 +1745,7 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
               <div><span>{data.host} · change {data.changeNumber}, patchset {data.revisionNumber}</span><button type="button" onClick={() => void copyGeneratedReview()}><Copy size={13} /> {copied ? "Copied" : "Copy command"}</button></div>
               <pre><code>{generatedReview}</code></pre>
             </div>
-            <p>The command sends Gerrit a <code>ReviewInput</code> JSON document on stdin, including local inline comments and replies. Comments are keyed by file path; <code>/PATCHSET_LEVEL</code> is Gerrit&rsquo;s reserved path for change-wide comments that aren&rsquo;t attached to a file, and <code>/COMMIT_MSG</code> targets the commit message.</p>
+            <p>The command sends Gerrit a <code>ReviewInput</code> JSON document on stdin, including local inline comments and replies. Comments are keyed by file path; <code>/PATCHSET_LEVEL</code> is Gerrit&rsquo;s reserved path for change-wide comments that aren&rsquo;t attached to a file, and <code>/COMMIT_MSG</code> targets the commit message. When you compare two patchsets, comments on the left-hand side belong to the base patchset, so they are sent as a second command.</p>
           </section>
         </div>
       )}

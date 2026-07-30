@@ -31,7 +31,7 @@ type GerritDetail = {
     _number: number;
     created?: string;
     uploader?: GerritAccount;
-    commit?: { subject?: string; message?: string };
+    commit?: { subject?: string; message?: string; parents?: { commit: string }[] };
   }>;
   updated: string;
   insertions?: number;

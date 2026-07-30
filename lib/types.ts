@@ -49,6 +49,10 @@ export type ChangeData = {
   changeNumber: number;
   subject: string;
   commitMessage: string;
+  // Gerrit's /COMMIT_MSG magic file prefixes the message with generated header
+  // lines (Parent/Merge Of, Author, AuthorDate, Commit, CommitDate, blank), so
+  // comment line numbers on that path are offset by this many lines.
+  commitMessageLineOffset: number;
   project: string;
   branch: string;
   status: string;

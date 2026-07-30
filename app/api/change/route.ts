@@ -143,6 +143,9 @@ export async function GET(request: NextRequest) {
     const selectedRevision = Object.values(detail.revisions).find((item) => item._number === revisionNumber);
     const commitMessage = selectedRevision?.commit?.message?.trim() || detail.subject;
     const commitSubject = selectedRevision?.commit?.subject?.trim() || commitMessage.split(/\r?\n/, 1)[0] || detail.subject;
+    // /COMMIT_MSG header, per Gerrit's MagicFile#forCommitMessage: one line per parent
+    // (none for a root commit), Author, AuthorDate, Commit, CommitDate, then a blank line.
+    const commitMessageLineOffset = (selectedRevision?.commit?.parents?.length ?? 1) + 5;
     const baseRevisionNumber = requestedBase ? Number(requestedBase) : undefined;
     if (baseRevisionNumber !== undefined && (!Number.isInteger(baseRevisionNumber) || baseRevisionNumber < 1 || baseRevisionNumber === revisionNumber || !Object.values(detail.revisions).some((item) => item._number === baseRevisionNumber))) {
       return NextResponse.json({ error: "Invalid comparison patchset." }, { status: 400 });
@@ -256,6 +259,7 @@ export async function GET(request: NextRequest) {
       changeNumber: detail._number,
       subject: commitSubject,
       commitMessage,
+      commitMessageLineOffset,
       project: detail.project,
       branch: detail.branch,
       status: detail.status,

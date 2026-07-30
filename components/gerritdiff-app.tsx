@@ -128,14 +128,16 @@ function patchsetUrl(sourceUrl: string, changeNumber: number, patchset: number) 
   return url.toString();
 }
 
-function Viewer({ data }: { data: ChangeData }) {
+function Viewer({ data, initialThreadId }: { data: ChangeData; initialThreadId?: string }) {
   const theme = useGerritDiffTheme();
-  const openComparison = (patchset: number, base?: number) => {
+  const openComparison = (patchset: number, base?: number, threadId?: string) => {
     const url = patchsetUrl(data.sourceUrl, data.changeNumber, patchset);
-    const baseQuery = base === undefined ? "" : `&base=${base}`;
-    window.location.assign(`/?url=${encodeURIComponent(url)}${baseQuery}`);
+    const query = new URLSearchParams({ url });
+    if (base !== undefined) query.set("base", String(base));
+    if (threadId) query.set("thread", threadId);
+    window.location.assign(`/?${query}`);
   };
-  const openPatchset = (patchset: number) => openComparison(patchset, data.baseRevisionNumber === patchset ? undefined : data.baseRevisionNumber);
+  const openPatchset = (patchset: number, threadId?: string) => openComparison(patchset, data.baseRevisionNumber === patchset ? undefined : data.baseRevisionNumber, threadId);
   return (
     <main className="viewer">
       <header className="viewer-topbar">
@@ -146,12 +148,12 @@ function Viewer({ data }: { data: ChangeData }) {
           <ThemeButton />
         </div>
       </header>
-      <ChangeReview data={data} theme={theme} onPatchsetChange={openPatchset} onBaseChange={(base) => openComparison(data.revisionNumber, base)} />
+      <ChangeReview data={data} theme={theme} initialThreadId={initialThreadId} onPatchsetChange={openPatchset} onBaseChange={(base) => openComparison(data.revisionNumber, base)} />
     </main>
   );
 }
 
-function ChangeLoader({ url, base }: { url: string; base?: string }) {
+function ChangeLoader({ url, base, threadId }: { url: string; base?: string; threadId?: string }) {
   const [data, setData] = useState<ChangeData | null>(null);
   const [error, setError] = useState("");
   const [attempt, setAttempt] = useState(0);
@@ -196,12 +198,13 @@ function ChangeLoader({ url, base }: { url: string; base?: string }) {
       <div className="state-card"><LoaderCircle className="spinner" size={30} /><h1>Loading change</h1><p>Fetching metadata and patch from Gerrit…</p></div>
     </main>
   );
-  return <Viewer data={data} />;
+  return <Viewer data={data} initialThreadId={threadId} />;
 }
 
 export function GerritDiffApp() {
   const searchParams = useSearchParams();
   const url = searchParams.get("url");
   const base = searchParams.get("base") ?? undefined;
-  return url ? <ChangeLoader key={`${url}:${base ?? "parent"}`} url={url} base={base} /> : <Landing />;
+  const threadId = searchParams.get("thread") ?? undefined;
+  return url ? <ChangeLoader key={`${url}:${base ?? "parent"}:${threadId ?? "no-thread"}`} url={url} base={base} threadId={threadId} /> : <Landing />;
 }

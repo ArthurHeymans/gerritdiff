@@ -88,7 +88,6 @@ type ProjectUiSettings = {
   showWhitespace?: boolean;
   sidebarCollapsed?: boolean;
   sidebarMode?: "changed" | "repository" | "discussion";
-  rightPanelOpen?: boolean;
 };
 
 function projectUiStorageKey(host: string, project: string) {
@@ -667,7 +666,7 @@ function ReviewFileTree({
   return <FileTree model={model} className="pierre-tree" />;
 }
 
-export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { data: ChangeData; theme: GerritDiffTheme; onPatchsetChange(patchset: number): void; onBaseChange(base?: number): void }) {
+export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, onBaseChange }: { data: ChangeData; theme: GerritDiffTheme; initialThreadId?: string; onPatchsetChange(patchset: number, threadId?: string): void; onBaseChange(base?: number): void }) {
   const viewerRef = useRef<CodeViewHandle<CommentMetadata> | null>(null);
   const codeViewContainerRef = useRef<HTMLDivElement | null>(null);
   const activeDraftRef = useRef<ActiveDraft | null>(null);
@@ -688,7 +687,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
   // null = closed; otherwise the path whose unanchored comments the panel shows
   // ("/PATCHSET_LEVEL" for change-wide, or a file path for file-level).
   const [commentScope, setCommentScope] = useState<string | null>(null);
-  const pendingThreadRef = useRef<{ key: string; patchset: number } | null>(null);
+  const openedInitialThreadRef = useRef<string | null>(null);
   const [scopeDraft, setScopeDraft] = useState<{ key: string | null; message: string; resolved: boolean } | null>(null);
   const [relationPanelOpen, setRelationPanelOpen] = useState(false);
   const [publishOpen, setPublishOpen] = useState(false);
@@ -777,11 +776,10 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
       setSidebarCollapsed(settings.sidebarCollapsed ?? false);
       if (settings.sidebarMode === "repository" || settings.sidebarMode === "discussion") setSidebarMode(settings.sidebarMode);
       else setSidebarMode("changed");
-      const isMobile = window.matchMedia("(max-width: 800px)").matches;
-      setRelationPanelOpen(!isMobile && (settings.rightPanelOpen ?? data.relationChain.length > 1));
+      setRelationPanelOpen(false);
     });
     return () => cancelAnimationFrame(frame);
-  }, [data.host, data.project, data.relationChain.length]);
+  }, [data.host, data.project]);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia("(max-width: 767px)");
@@ -1078,17 +1076,24 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     setLocalReplies((current) => current.filter((entry) => entry.key !== key));
   }, []);
 
+  const updateThreadUrl = useCallback((threadId?: string) => {
+    const url = new URL(window.location.href);
+    if (threadId) url.searchParams.set("thread", threadId);
+    else url.searchParams.delete("thread");
+    window.history.replaceState(null, "", url);
+  }, []);
+
   const toggleActiveDiscussion = useCallback((key: string) => {
     setActiveThreadKey((current) => {
       const next = current === key ? null : key;
       if (next) {
         setRelationPanelOpen(false);
         setCommentScope(null);
-      }
-      saveProjectUiSettings(data.host, data.project, { rightPanelOpen: Boolean(next) });
+        updateThreadUrl(next.replace(/^gerrit:/, ""));
+      } else updateThreadUrl();
       return next;
     });
-  }, [data.host, data.project]);
+  }, [updateThreadUrl]);
 
   const localReplyComments = useMemo<LocalReviewComment[]>(() => localReplies.flatMap((reply) => {
     const thread = discussionThreads.find((candidate) => `gerrit:${candidate.id}` === reply.key);
@@ -1133,12 +1138,9 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     setRelationPanelOpen(false);
     setActiveThreadKey(null);
     setScopeDraft(null);
-    setCommentScope((current) => {
-      const next = current === path ? null : path;
-      saveProjectUiSettings(data.host, data.project, { rightPanelOpen: Boolean(next) });
-      return next;
-    });
-  }, [data.host, data.project]);
+    updateThreadUrl();
+    setCommentScope((current) => current === path ? null : path);
+  }, [updateThreadUrl]);
 
   const saveScopeComment = useCallback((path: string, key: string | null, message: string, resolved: boolean) => {
     const entryKey = key ?? `scope-${nextCommentRef.current++}`;
@@ -1248,14 +1250,13 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     setRelationPanelOpen(false);
     setCommentScope(null);
     setActiveThreadKey(key);
-    saveProjectUiSettings(data.host, data.project, { rightPanelOpen: true });
+    updateThreadUrl(thread.id);
 
-    // Thread lives on another patchset: switch revisions and re-select once it loads.
+    // Preserve the selected thread in the URL when its patchset must be loaded.
     if (!threadBelongsToPatchset(thread, data.revisionNumber)) {
       const patchset = threadPatchset(thread) ?? thread.comments.at(-1)?.patchSet;
       if (patchset && patchset !== data.revisionNumber) {
-        pendingThreadRef.current = { key, patchset };
-        onPatchsetChange(patchset);
+        onPatchsetChange(patchset, thread.id);
         return;
       }
     }
@@ -1274,15 +1275,20 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
     const range = commentRange(anchor);
     setSelectedLines(anchor.range ? null : { id: itemId, range });
     viewerRef.current?.scrollTo({ type: "range", id: itemId, range, align: "center", behavior: "smooth" });
-  }, [data.host, data.project, data.revisionNumber, loadFullDiff, onPatchsetChange, pathToChangedId, scrollToItem]);
+  }, [data.revisionNumber, loadFullDiff, onPatchsetChange, pathToChangedId, scrollToItem, updateThreadUrl]);
 
   useEffect(() => {
-    const pending = pendingThreadRef.current;
-    if (!pending || pending.patchset !== data.revisionNumber) return;
-    pendingThreadRef.current = null;
-    const thread = discussionThreads.find((candidate) => `gerrit:${candidate.id}` === pending.key);
-    if (thread) void selectDiscussion(thread);
-  }, [data.revisionNumber, discussionThreads, selectDiscussion]);
+    if (!initialThreadId || openedInitialThreadRef.current === initialThreadId) return;
+    const thread = discussionThreads.find((candidate) => candidate.id === initialThreadId);
+    if (!thread) return;
+    const frame = requestAnimationFrame(() => {
+      openedInitialThreadRef.current = initialThreadId;
+      setSidebarMode("discussion");
+      saveProjectUiSettings(data.host, data.project, { sidebarMode: "discussion" });
+      void selectDiscussion(thread);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [data.host, data.project, discussionThreads, initialThreadId, selectDiscussion]);
 
   const openRepositoryFile = useCallback(async (path: string) => {
     const changedId = pathToChangedId.get(path);
@@ -1448,11 +1454,8 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
               onClick={() => {
                 setCommentScope(null);
                 setActiveThreadKey(null);
-                setRelationPanelOpen((open) => {
-                  const next = !open;
-                  saveProjectUiSettings(data.host, data.project, { rightPanelOpen: next });
-                  return next;
-                });
+                updateThreadUrl();
+                setRelationPanelOpen((open) => !open);
               }}
             >
               <GitBranch size={12} />
@@ -1579,7 +1582,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
                   ? `${commentScope === "/PATCHSET_LEVEL" ? `Patchset ${data.revisionNumber}` : commentScope} · ${scopeThreads.length} thread${scopeThreads.length === 1 ? "" : "s"}${scopeDrafts.length ? `, ${scopeDrafts.length} draft` : ""}`
                   : `${activeThread?.comments.length ?? 0} comment${activeThread?.comments.length === 1 ? "" : "s"}`}</strong>
             </div>
-            <button type="button" onClick={() => { setRelationPanelOpen(false); setCommentScope(null); setActiveThreadKey(null); saveProjectUiSettings(data.host, data.project, { rightPanelOpen: false }); }} aria-label="Close side panel"><X size={15} /></button>
+            <button type="button" onClick={() => { setRelationPanelOpen(false); setCommentScope(null); setActiveThreadKey(null); updateThreadUrl(); }} aria-label="Close side panel"><X size={15} /></button>
           </div>
           <div className={`discussion-panel-body${commentScope && !relationPanelOpen ? " patchset-discussion-list" : ""}`}>
             {relationPanelOpen ? <RelationChainPanel relations={data.relationChain} /> : null}
@@ -1655,7 +1658,7 @@ export function ChangeReview({ data, theme, onPatchsetChange, onBaseChange }: { 
                 annotation={activePanelAnnotation}
                 expanded
                 localReply={localReplies.find((reply) => reply.key === activeThreadKey)}
-                onToggle={() => setActiveThreadKey(null)}
+                onToggle={() => { setActiveThreadKey(null); updateThreadUrl(); }}
                 onSaveReply={saveLocalReply}
                 onDeleteReply={deleteLocalReply}
               />

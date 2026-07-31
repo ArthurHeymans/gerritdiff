@@ -443,16 +443,19 @@ function DraftComment({
           placeholder="Add a comment…"
           rows={2}
         />
-        <div className="reply-options">
-          <button className={`resolution-toggle ${unresolved ? "is-unresolved" : "is-resolved"}`} type="button" aria-pressed={!unresolved} onClick={() => setUnresolved((current) => !current)}>
+        <div className="comment-actions">
+          <button type="submit" disabled={!trimmed}><Send size={13} /> {metadata?.message ? "Save comment" : "Add comment"}</button>
+          <button
+            className={`resolution-toggle ${unresolved ? "is-unresolved" : "is-resolved"}`}
+            type="button"
+            aria-pressed={!unresolved}
+            title="Unresolved comments block until someone marks them done."
+            onClick={() => setUnresolved((current) => !current)}
+          >
             <CircleCheck size={12} /> {unresolved ? "Unresolved" : "Resolved"}
           </button>
-          <span>Unresolved comments block until someone marks them done.</span>
-        </div>
-        <div className="comment-actions">
           <span>Ctrl ↵ to submit</span>
           <button type="button" className="comment-cancel" onClick={() => onCancel(itemId, key)}><X size={14} /> Cancel</button>
-          <button type="submit" disabled={!trimmed}><Send size={13} /> {metadata?.message ? "Save comment" : "Add comment"}</button>
         </div>
       </div>
     </form>
@@ -914,6 +917,13 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
         if (start === end && startCharacter === endCharacter) continue;
         const rect = domRange.getBoundingClientRect();
         const range = { start, end, side, endSide } satisfies SelectedLineRange;
+        const popupWidth = 120;
+        const popupHeight = 30;
+        const popupGap = 6;
+        const topAbove = rect.top - popupHeight - popupGap;
+        const top = topAbove >= 8
+          ? topAbove
+          : Math.min(window.innerHeight - popupHeight - 8, rect.bottom + popupGap);
         setCodeTextSelection({
           itemId: rendered.id,
           range,
@@ -923,8 +933,8 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
             end_line: end,
             end_character: endCharacter,
           },
-          top: Math.max(8, rect.top - 38),
-          left: Math.min(window.innerWidth - 120, Math.max(8, rect.left + rect.width / 2 - 54)),
+          top: Math.max(8, top),
+          left: Math.max(8, Math.min(window.innerWidth - popupWidth - 8, rect.left + rect.width / 2 - popupWidth / 2)),
         });
         return;
       }
@@ -1095,6 +1105,23 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
       setCodeTextSelection(null);
     }
   }, [removeComment, updateCommentItem]);
+
+  const commentOnTextSelection = useCallback(() => {
+    if (!codeTextSelection) return;
+    createDraft(codeTextSelection.range, codeTextSelection.itemId, codeTextSelection.textRange);
+  }, [codeTextSelection, createDraft]);
+
+  useEffect(() => {
+    const handleKeyboardComment = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing || event.key.toLowerCase() !== "c" || event.ctrlKey || event.metaKey || event.altKey || !codeTextSelection) return;
+      const target = event.target;
+      if (target instanceof HTMLElement && target.closest("input, textarea, select, [contenteditable=\"true\"]")) return;
+      event.preventDefault();
+      commentOnTextSelection();
+    };
+    window.addEventListener("keydown", handleKeyboardComment);
+    return () => window.removeEventListener("keydown", handleKeyboardComment);
+  }, [codeTextSelection, commentOnTextSelection]);
 
   const toggleCollapsed = useCallback((itemId: string) => {
     updateCommentItem(itemId, (item) => { item.collapsed = !item.collapsed; return true; });
@@ -1667,10 +1694,12 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
             type="button"
             className="text-selection-comment"
             style={{ top: codeTextSelection.top, left: codeTextSelection.left }}
+            aria-keyshortcuts="C"
+            title="Comment on selected text (C)"
             onPointerDown={(event) => event.preventDefault()}
-            onClick={() => createDraft(codeTextSelection.range, codeTextSelection.itemId, codeTextSelection.textRange)}
+            onClick={commentOnTextSelection}
           >
-            <MessageSquare size={13} /> Comment
+            <MessageSquare size={13} /> Comment <kbd>C</kbd>
           </button>
         )}
       </section>

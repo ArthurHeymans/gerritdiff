@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { ArrowRight, ExternalLink, LoaderCircle, Moon, Search, Sun, X } from "lucide-react";
 import { ChangeReview } from "@/components/change-review";
 import { setGerritDiffTheme, useGerritDiffTheme } from "@/lib/theme";
@@ -128,14 +128,15 @@ function patchsetUrl(sourceUrl: string, changeNumber: number, patchset: number) 
   return url.toString();
 }
 
-function Viewer({ data, initialThreadId }: { data: ChangeData; initialThreadId?: string }) {
+function Viewer({ data, initialThreadId, loading }: { data: ChangeData; initialThreadId?: string; loading: boolean }) {
   const theme = useGerritDiffTheme();
+  const router = useRouter();
   const openComparison = (patchset: number, base?: number, threadId?: string) => {
     const url = patchsetUrl(data.sourceUrl, data.changeNumber, patchset);
     const query = new URLSearchParams({ url });
     if (base !== undefined) query.set("base", String(base));
     if (threadId) query.set("thread", threadId);
-    window.location.assign(`/?${query}`);
+    router.push(`/?${query}`, { scroll: false });
   };
   const openPatchset = (patchset: number, threadId?: string) => openComparison(patchset, data.baseRevisionNumber === patchset ? undefined : data.baseRevisionNumber, threadId);
   return (
@@ -148,7 +149,7 @@ function Viewer({ data, initialThreadId }: { data: ChangeData; initialThreadId?:
           <ThemeButton />
         </div>
       </header>
-      <ChangeReview data={data} theme={theme} initialThreadId={initialThreadId} onPatchsetChange={openPatchset} onBaseChange={(base) => openComparison(data.revisionNumber, base)} />
+      <ChangeReview key={`${data.revision}:${data.baseRevisionNumber ?? "parent"}`} data={data} theme={theme} initialThreadId={initialThreadId} comparisonLoading={loading} onPatchsetChange={openPatchset} onBaseChange={(base) => openComparison(data.revisionNumber, base)} />
     </main>
   );
 }
@@ -156,7 +157,10 @@ function Viewer({ data, initialThreadId }: { data: ChangeData; initialThreadId?:
 function ChangeLoader({ url, base, threadId }: { url: string; base?: string; threadId?: string }) {
   const [data, setData] = useState<ChangeData | null>(null);
   const [error, setError] = useState("");
+  const [loadedRequest, setLoadedRequest] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
+  const requestKey = `${url}:${base ?? "parent"}`;
+  const loading = loadedRequest !== requestKey;
 
   useEffect(() => {
     const controller = new AbortController();
@@ -166,12 +170,15 @@ function ChangeLoader({ url, base, threadId }: { url: string; base?: string; thr
         if (!response.ok) throw new Error(body.error ?? "Couldn't load this change.");
         return body as ChangeData;
       })
-      .then(setData)
+      .then((nextData) => {
+        setData(nextData);
+        setLoadedRequest(requestKey);
+      })
       .catch((reason) => {
         if (reason.name !== "AbortError") setError(reason.message);
       });
     return () => controller.abort();
-  }, [attempt, base, url]);
+  }, [attempt, base, requestKey, url]);
 
   if (error) return (
     <main className="state-page">
@@ -198,7 +205,7 @@ function ChangeLoader({ url, base, threadId }: { url: string; base?: string; thr
       <div className="state-card"><LoaderCircle className="spinner" size={30} /><h1>Loading change</h1><p>Fetching metadata and patch from Gerrit…</p></div>
     </main>
   );
-  return <Viewer data={data} initialThreadId={threadId} />;
+  return <Viewer data={data} initialThreadId={threadId} loading={loading} />;
 }
 
 export function GerritDiffApp() {
@@ -206,5 +213,5 @@ export function GerritDiffApp() {
   const url = searchParams.get("url");
   const base = searchParams.get("base") ?? undefined;
   const threadId = searchParams.get("thread") ?? undefined;
-  return url ? <ChangeLoader key={`${url}:${base ?? "parent"}`} url={url} base={base} threadId={threadId} /> : <Landing />;
+  return url ? <ChangeLoader url={url} base={base} threadId={threadId} /> : <Landing />;
 }

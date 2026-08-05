@@ -783,7 +783,7 @@ function ReviewFileTree({
   return <FileTree model={model} className="pierre-tree" />;
 }
 
-export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, onBaseChange }: { data: ChangeData; theme: GerritDiffTheme; initialThreadId?: string; onPatchsetChange(patchset: number, threadId?: string): void; onBaseChange(base?: number): void }) {
+export function ChangeReview({ data, theme, initialThreadId, comparisonLoading = false, onPatchsetChange, onBaseChange }: { data: ChangeData; theme: GerritDiffTheme; initialThreadId?: string; comparisonLoading?: boolean; onPatchsetChange(patchset: number, threadId?: string): void; onBaseChange(base?: number): void }) {
   const viewerRef = useRef<CodeViewHandle<CommentMetadata> | null>(null);
   const codeViewContainerRef = useRef<HTMLDivElement | null>(null);
   const activeDraftRef = useRef<ActiveDraft | null>(null);
@@ -1611,12 +1611,12 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
             <GitBranch size={14} /><code>{data.branch}</code>
             <div className="patchset-picker">
               <span>Base</span>
-              <select aria-label="Base patchset" value={data.baseRevisionNumber ?? "parent"} onChange={(event) => onBaseChange(event.target.value === "parent" ? undefined : Number(event.target.value))}>
+              <select aria-label="Base patchset" value={data.baseRevisionNumber ?? "parent"} disabled={comparisonLoading} onChange={(event) => onBaseChange(event.target.value === "parent" ? undefined : Number(event.target.value))}>
                 <option value="parent">Parent</option>
                 {data.revisions.filter((revision) => revision.number !== data.revisionNumber).map((revision) => <option key={revision.revision} value={revision.number}>{revision.number}</option>)}
               </select>
               <small>to patchset</small>
-              <select aria-label="Target patchset" value={data.revisionNumber} onChange={(event) => onPatchsetChange(Number(event.target.value))}>
+              <select aria-label="Target patchset" value={data.revisionNumber} disabled={comparisonLoading} onChange={(event) => onPatchsetChange(Number(event.target.value))}>
                 {data.revisions.map((revision) => <option key={revision.revision} value={revision.number}>{revision.number}{revision.number === data.revisions.at(-1)?.number ? " (latest)" : ""}</option>)}
               </select>
             </div>
@@ -1652,6 +1652,11 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
               {unresolvedPatchsetDiscussionCount > 0 && <b>{unresolvedPatchsetDiscussionCount} unresolved</b>}
               {localPatchsetComments.length > 0 && <b className="is-draft">{localPatchsetComments.length} draft</b>}
             </button>
+            {comparisonLoading && (
+              <span className="comparison-loading" role="status" aria-label="Loading patchset" title="Loading patchset…">
+                <LoaderCircle className="spinner" size={13} />
+              </span>
+            )}
           </div>
           <div className={`reviewers-summary${reviewersExpanded ? " is-expanded" : ""}`} aria-label="Current reviewers and votes">
             <button type="button" className="reviewers-toggle" aria-expanded={reviewersExpanded} onClick={() => setReviewersExpanded((current) => !current)}>

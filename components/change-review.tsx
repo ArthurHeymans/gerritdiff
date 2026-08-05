@@ -705,6 +705,49 @@ function CollapseButton({ collapsed, disabled, onToggle }: { collapsed?: boolean
   );
 }
 
+function SidebarDiffStats({ files, additions, deletions }: { files: FileDiffMetadata[]; additions: number; deletions: number }) {
+  const [expanded, setExpanded] = useState(true);
+  const lines = useMemo(() => files.reduce((total, file) => total + file.unifiedLineCount, 0), [files]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "F2") return;
+      event.preventDefault();
+      setExpanded((current) => !current);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
+  const rows = [
+    { label: "Files", value: files.length, className: "" },
+    { label: "Additions", value: additions, className: "is-addition" },
+    { label: "Deletions", value: deletions, className: "is-deletion" },
+    { label: "Lines", value: lines, className: "" },
+  ];
+
+  return (
+    <div className={`sidebar-diff-stats${expanded ? " is-expanded" : ""}`}>
+      <button type="button" className="sidebar-diff-stats-toggle" aria-expanded={expanded} onClick={() => setExpanded((current) => !current)}>
+        <span className="sidebar-diff-stats-icon" aria-hidden="true">±</span>
+        <span>Diff stats</span>
+        <small>F2</small>
+        <ChevronDown size={12} />
+      </button>
+      {expanded && (
+        <div className="sidebar-diff-stats-rows">
+          {rows.map((row) => (
+            <div className="sidebar-diff-stat" key={row.label}>
+              <span>{row.label}</span>
+              <strong className={row.className}>{row.value.toLocaleString("en-US")}</strong>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ReviewFileTree({
   files,
   onSelect,
@@ -1545,10 +1588,7 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
             <button type="submit" disabled={!knownPath.trim()}>Open</button>
           </form>
         )}
-        <div className="sidebar-summary">
-          <span><i className="dot add-dot" /> {data.insertions} additions</span>
-          <span><i className="dot del-dot" /> {data.deletions} deletions</span>
-        </div>
+        <SidebarDiffStats files={files} additions={data.insertions} deletions={data.deletions} />
       </aside>
 
       <section className="change-main pierre-main">

@@ -752,6 +752,7 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
   const [tabSize, setTabSize] = useState(2);
   const [sidebarMode, setSidebarMode] = useState<"changed" | "repository" | "discussion">("changed");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [reviewersExpanded, setReviewersExpanded] = useState((data.reviewers?.length ?? 0) <= 6);
   const [knownPath, setKnownPath] = useState("");
   const [repositoryError, setRepositoryError] = useState("");
   const [loadingItems, setLoadingItems] = useState<ReadonlySet<string>>(() => new Set());
@@ -1612,23 +1613,31 @@ export function ChangeReview({ data, theme, initialThreadId, onPatchsetChange, o
               {localPatchsetComments.length > 0 && <b className="is-draft">{localPatchsetComments.length} draft</b>}
             </button>
           </div>
-          <div className="reviewers-summary" aria-label="Current reviewers and votes">
-            <span className="reviewers-label">Reviewers</span>
-            {reviewers.length ? reviewers.map((reviewer, index) => {
-              const reviewerInitials = reviewer.name.split(/\s+/).slice(0, 2).map((word) => word[0]).join("").toUpperCase();
-              return (
-                <span className="reviewer-chip" key={reviewer.email ?? `${reviewer.name}:${index}`} title={reviewer.email}>
-                  <span className="reviewer-avatar">{reviewer.avatarUrl ? <Image src={reviewer.avatarUrl} alt="" width={19} height={19} unoptimized /> : reviewerInitials}</span>
-                  <strong>{reviewer.name}</strong>
-                  {reviewer.codeReview !== undefined && reviewer.codeReview !== 0 && (
-                    <span className={`reviewer-vote ${voteClass(reviewer.codeReview)}`} title={`Code-Review ${voteText(reviewer.codeReview)}`} aria-label={`Code-Review ${voteText(reviewer.codeReview)}`}>CR {voteText(reviewer.codeReview)}</span>
-                  )}
-                  {reviewer.verified !== undefined && reviewer.verified !== 0 && (
-                    <span className={`reviewer-vote verified ${voteClass(reviewer.verified)}`} title={`Verified ${voteText(reviewer.verified)}`} aria-label={`Verified ${voteText(reviewer.verified)}`}>V {voteText(reviewer.verified)}</span>
-                  )}
-                </span>
-              );
-            }) : <span className="reviewers-empty">No current reviewers</span>}
+          <div className={`reviewers-summary${reviewersExpanded ? " is-expanded" : ""}`} aria-label="Current reviewers and votes">
+            <button type="button" className="reviewers-toggle" aria-expanded={reviewersExpanded} onClick={() => setReviewersExpanded((current) => !current)}>
+              <span className="reviewers-label">Reviewers</span>
+              <b>{reviewers.length}</b>
+              <ChevronDown size={12} />
+            </button>
+            {reviewersExpanded && (
+              <div className="reviewers-list">
+                {reviewers.length ? reviewers.map((reviewer, index) => {
+                  const reviewerInitials = reviewer.name.split(/\s+/).slice(0, 2).map((word) => word[0]).join("").toUpperCase();
+                  return (
+                    <span className="reviewer-chip" key={reviewer.email ?? `${reviewer.name}:${index}`} title={reviewer.email}>
+                      <span className="reviewer-avatar">{reviewer.avatarUrl ? <Image src={reviewer.avatarUrl} alt="" width={19} height={19} unoptimized /> : reviewerInitials}</span>
+                      <strong>{reviewer.name}</strong>
+                      {reviewer.codeReview !== undefined && reviewer.codeReview !== 0 && (
+                        <span className={`reviewer-vote ${voteClass(reviewer.codeReview)}`} title={`Code-Review ${voteText(reviewer.codeReview)}`} aria-label={`Code-Review ${voteText(reviewer.codeReview)}`}>CR {voteText(reviewer.codeReview)}</span>
+                      )}
+                      {reviewer.verified !== undefined && reviewer.verified !== 0 && (
+                        <span className={`reviewer-vote verified ${voteClass(reviewer.verified)}`} title={`Verified ${voteText(reviewer.verified)}`} aria-label={`Verified ${voteText(reviewer.verified)}`}>V {voteText(reviewer.verified)}</span>
+                      )}
+                    </span>
+                  );
+                }) : <span className="reviewers-empty">No current reviewers</span>}
+              </div>
+            )}
           </div>
         </div>
         {repositoryError && <div className="repository-error"><X size={13} /> <span>{repositoryError}</span><button onClick={() => setRepositoryError("")} aria-label="Dismiss"><X size={12} /></button></div>}

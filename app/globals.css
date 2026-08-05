@@ -11,6 +11,9 @@
   --border: #29292f;
   --accent: #9b87f5;
   --accent-strong: #b7a7ff;
+  --primary-button-bg: #6748cf;
+  --primary-button-hover: #7658dc;
+  --primary-button-fg: #ffffff;
   --green: #53d18b;
   --green-bg: rgba(50, 191, 112, .12);
   --red: #ff6b7a;
@@ -43,6 +46,9 @@
   --border: #dedee3;
   --accent: #7158d9;
   --accent-strong: #5b40ce;
+  --primary-button-bg: #5b40ce;
+  --primary-button-hover: #4f35bd;
+  --primary-button-fg: #ffffff;
   --green: #16864b;
   --green-bg: rgba(27, 153, 82, .1);
   --red: #d83d52;
@@ -255,7 +261,7 @@ a { color: inherit; text-decoration: none; }
 .text-selection-comment:hover { filter: brightness(1.08); transform: translateY(-1px); }
 .comment-count { color: var(--accent-strong); background: rgba(145,119,244,.1); border: 1px solid rgba(145,119,244,.18); border-radius: 99px; padding: 3px 7px; }
 .publish-review-button { height: 28px; margin-left: auto; display: inline-flex; align-items: center; gap: 5px; padding: 0 9px; border: 1px solid var(--border); border-radius: 6px; color: var(--text); background: var(--panel-2); cursor: pointer; font-size: 9px; font-weight: 800; }.publish-review-button:hover { border-color: var(--accent); background: var(--panel-3); }.publish-review-button svg { color: var(--accent-strong); }
-.header-review-button { height: 30px; flex: none; border-color: var(--accent); color: #17131f; background: var(--accent-strong); }.header-review-button:hover { border-color: var(--accent-strong); background: color-mix(in srgb, var(--accent-strong) 88%, white); }.header-review-button svg { color: currentColor; }
+.header-review-button { height: 30px; flex: none; border-color: var(--primary-button-bg); color: var(--primary-button-fg); background: var(--primary-button-bg); box-shadow: 0 1px 2px rgba(0,0,0,.18); }.header-review-button:hover { border-color: var(--primary-button-hover); color: var(--primary-button-fg); background: var(--primary-button-hover); }.header-review-button svg { color: currentColor; }
 .diff-toolbar .view-settings { margin-left: auto; }
 .view-settings { position: relative; }.view-settings > summary { height: 28px; display: inline-flex; align-items: center; gap: 6px; padding: 0 8px; border: 1px solid var(--border); border-radius: 6px; color: var(--muted); background: var(--panel-2); cursor: pointer; list-style: none; font: 700 9px Manrope, sans-serif; }.view-settings > summary::-webkit-details-marker { display: none; }.view-settings > summary:hover, .view-settings[open] > summary { color: var(--text); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); background: var(--panel-3); }.view-settings > summary > svg:first-child { color: var(--accent); }.view-settings-chevron { transition: transform .15s; }.view-settings[open] .view-settings-chevron { transform: rotate(180deg); }
 .view-settings-menu { position: absolute; top: calc(100% + 7px); right: 0; z-index: 40; width: 245px; padding: 7px; border: 1px solid var(--border); border-radius: 9px; color: var(--text); background: var(--panel); box-shadow: 0 14px 40px rgba(0,0,0,.28); }.view-settings-row { min-height: 38px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 7px; color: var(--muted); font-size: 9px; font-weight: 700; }.view-settings-row + .view-settings-row { border-top: 1px solid var(--border); }.view-settings-row > span { display: inline-flex; align-items: center; gap: 6px; }.view-settings-row select { height: 27px; padding: 0 7px; border: 1px solid var(--border); border-radius: 6px; outline: none; color: var(--text); background: var(--panel-2); cursor: pointer; font: 9px "DM Mono", monospace; }.view-settings-row select:focus { border-color: var(--accent); }.view-settings-row input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }

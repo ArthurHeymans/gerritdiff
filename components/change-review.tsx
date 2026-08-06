@@ -17,7 +17,7 @@ import {
 import { CodeView, type CodeViewHandle, WorkerPoolContextProvider } from "@pierre/diffs/react";
 import type { GitStatus, GitStatusEntry } from "@pierre/trees";
 import { FileTree, useFileTree } from "@pierre/trees/react";
-import { Check, ChevronDown, CircleCheck, Columns2, Copy, FileText, GitBranch, LoaderCircle, MessageSquare, PanelLeftClose, PanelLeftOpen, Pencil, Pilcrow, Quote, Reply, Rows3, Send, Settings2, Terminal, Trash2, X } from "lucide-react";
+import { Check, ChevronDown, ChevronUp, CircleCheck, Columns2, Copy, FileText, GitBranch, LoaderCircle, MessageSquare, PanelLeftClose, PanelLeftOpen, Pencil, Pilcrow, Quote, Reply, Rows3, Search, Send, Settings2, Terminal, Trash2, X } from "lucide-react";
 import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RepositoryBrowser } from "@/components/repository-browser";
@@ -38,6 +38,7 @@ type RightPanel = { kind: "relation" } | { kind: "scope"; path: string } | { kin
 type LocalReply = { key: string; message: string; resolved: boolean };
 type LocalReviewComment = { key: string; path: string; message: string; range: SelectedLineRange; textRange?: GerritTextRange; gerritLine?: number; gerritRange?: GerritTextRange; parent?: number; inReplyTo?: string; unresolved?: boolean };
 type CodeTextSelection = { itemId: string; range: SelectedLineRange; textRange: GerritTextRange; top: number; left: number };
+type SearchMatch = { itemId: string; lineNumber: number; side?: "deletions" | "additions" };
 type GerritCommentInput = {
   // Omitted for /PATCHSET_LEVEL comments; Gerrit defaults to REVISION.
   side?: "PARENT" | "REVISION";
@@ -50,6 +51,8 @@ type GerritCommentInput = {
 };
 
 const COMMENT_HIGHLIGHT_NAME = "gerrit-comment-range";
+const SEARCH_HIGHLIGHT_NAME = "gerrit-search-result";
+const ACTIVE_SEARCH_HIGHLIGHT_NAME = "gerrit-search-result-active";
 const WORKER_POOL_OPTIONS = {
   poolSize: 3,
   totalASTLRUCacheSize: 100,
@@ -293,6 +296,23 @@ function textPosition(line: HTMLElement, character: number) {
     remaining -= node.data.length;
   }
   return last ? { node: last, offset: last.data.length } : { node: line, offset: 0 };
+}
+
+function textMatchRanges(line: HTMLElement, query: string) {
+  const normalizedText = (line.textContent ?? "").toLocaleLowerCase();
+  const normalizedQuery = query.toLocaleLowerCase();
+  const ranges: Range[] = [];
+  let index = normalizedText.indexOf(normalizedQuery);
+  while (index >= 0) {
+    const start = textPosition(line, index);
+    const end = textPosition(line, index + query.length);
+    const range = document.createRange();
+    range.setStart(start.node, start.offset);
+    range.setEnd(end.node, end.offset);
+    ranges.push(range);
+    index = normalizedText.indexOf(normalizedQuery, index + Math.max(query.length, 1));
+  }
+  return ranges;
 }
 
 function highlightedTextRanges(root: ShadowRoot, textRange: GerritTextRange, side: "deletions" | "additions", isDiff: boolean) {
@@ -788,6 +808,10 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
   const codeViewContainerRef = useRef<HTMLDivElement | null>(null);
   const activeDraftRef = useRef<ActiveDraft | null>(null);
   const nextCommentRef = useRef(1);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchIndex, setSearchIndex] = useState(0);
   const [selectedLines, setSelectedLines] = useState<CodeViewLineSelection | null>(null);
   const [codeTextSelection, setCodeTextSelection] = useState<CodeTextSelection | null>(null);
   const [diffStyle, setDiffStyle] = useState<"split" | "unified">("split");
@@ -891,6 +915,37 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
     () => new Map(files.map((file, index) => [file.name, `file-${index}`])),
     [files],
   );
+  const searchMatches = useMemo<SearchMatch[]>(() => {
+    const query = searchQuery.trim().toLocaleLowerCase();
+    if (!query) return [];
+    const matches: SearchMatch[] = [];
+    for (const item of initialItems) {
+      if (item.type === "file") {
+        item.file.contents.split(/\r?\n/).forEach((line, index) => {
+          if (line.toLocaleLowerCase().includes(query)) matches.push({ itemId: item.id, lineNumber: index + 1 });
+        });
+        continue;
+      }
+      item.fileDiff.deletionLines.forEach((line, index) => {
+        if (line.toLocaleLowerCase().includes(query)) matches.push({ itemId: item.id, lineNumber: index + 1, side: "deletions" });
+      });
+      item.fileDiff.additionLines.forEach((line, index) => {
+        if (line.toLocaleLowerCase().includes(query)) matches.push({ itemId: item.id, lineNumber: index + 1, side: "additions" });
+      });
+    }
+    return matches;
+  }, [initialItems, searchQuery]);
+
+  useEffect(() => {
+    const handleFindShortcut = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.key.toLowerCase() !== "f") return;
+      event.preventDefault();
+      setSearchOpen(true);
+      requestAnimationFrame(() => searchInputRef.current?.focus());
+    };
+    window.addEventListener("keydown", handleFindShortcut);
+    return () => window.removeEventListener("keydown", handleFindShortcut);
+  }, []);
 
   useEffect(() => {
     const settings = readProjectUiSettings(data.host, data.project);
@@ -916,6 +971,53 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
     mediaQuery.addEventListener("change", handleChange);
     return () => mediaQuery.removeEventListener("change", handleChange);
   }, [data.host, data.project]);
+
+  const refreshSearchHighlights = useCallback(() => {
+    const registry = (CSS as unknown as { highlights?: { set(name: string, highlight: unknown): void; delete(name: string): void } }).highlights;
+    const HighlightConstructor = (window as unknown as { Highlight?: new (...ranges: Range[]) => unknown }).Highlight;
+    const query = searchQuery.trim();
+    const activeMatch = searchMatches[searchIndex];
+    if (!registry || !HighlightConstructor || !query || !activeMatch) {
+      registry?.delete(SEARCH_HIGHLIGHT_NAME);
+      registry?.delete(ACTIVE_SEARCH_HIGHLIGHT_NAME);
+      return;
+    }
+    const ranges: Range[] = [];
+    const activeRanges: Range[] = [];
+    for (const rendered of viewerRef.current?.getInstance()?.getRenderedItems() ?? []) {
+      const root = rendered.element.shadowRoot;
+      if (!root) continue;
+      for (const line of root.querySelectorAll<HTMLElement>("[data-line]")) {
+        const lineNumber = Number(line.dataset.line);
+        const side = rendered.type === "diff" ? selectionSide(line) : undefined;
+        if (!searchMatches.some((match) => match.itemId === rendered.id && match.lineNumber === lineNumber && match.side === side)) continue;
+        const lineRanges = textMatchRanges(line, query);
+        if (rendered.id === activeMatch.itemId && lineNumber === activeMatch.lineNumber && side === activeMatch.side) activeRanges.push(...lineRanges);
+        else ranges.push(...lineRanges);
+      }
+    }
+    if (ranges.length) registry.set(SEARCH_HIGHLIGHT_NAME, new HighlightConstructor(...ranges));
+    else registry.delete(SEARCH_HIGHLIGHT_NAME);
+    if (activeRanges.length) registry.set(ACTIVE_SEARCH_HIGHLIGHT_NAME, new HighlightConstructor(...activeRanges));
+    else registry.delete(ACTIVE_SEARCH_HIGHLIGHT_NAME);
+  }, [searchIndex, searchMatches, searchQuery]);
+
+  useEffect(() => {
+    if (!searchOpen || !searchMatches.length) return;
+    const match = searchMatches[Math.min(searchIndex, searchMatches.length - 1)];
+    viewerRef.current?.scrollTo({ type: "line", id: match.itemId, lineNumber: match.lineNumber, side: match.side, align: "center" });
+    const frame = requestAnimationFrame(() => requestAnimationFrame(refreshSearchHighlights));
+    return () => cancelAnimationFrame(frame);
+  }, [refreshSearchHighlights, searchIndex, searchMatches, searchOpen]);
+
+  useEffect(() => {
+    if (searchOpen) refreshSearchHighlights();
+    else {
+      const registry = (CSS as unknown as { highlights?: { delete(name: string): void } }).highlights;
+      registry?.delete(SEARCH_HIGHLIGHT_NAME);
+      registry?.delete(ACTIVE_SEARCH_HIGHLIGHT_NAME);
+    }
+  }, [refreshSearchHighlights, searchOpen]);
 
   const refreshCommentHighlights = useCallback(() => {
     const registry = (CSS as unknown as { highlights?: { set(name: string, highlight: unknown): void; delete(name: string): void } }).highlights;
@@ -1206,15 +1308,20 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
     unsafeCSS: `
       :host { --diffs-tab-size: ${tabSize}; }
       ::highlight(${COMMENT_HIGHLIGHT_NAME}) { background-color: rgba(231, 177, 54, .38); text-decoration: underline 1px rgba(245, 198, 83, .9); text-underline-offset: 2px; }
+      ::highlight(${SEARCH_HIGHLIGHT_NAME}) { color: #17131f; background-color: rgba(255, 214, 72, .72); }
+      ::highlight(${ACTIVE_SEARCH_HIGHLIGHT_NAME}) { color: #17131f; background-color: #ff9f43; text-decoration: underline 2px #7a3d00; text-underline-offset: 2px; }
       :is(:host([data-show-whitespace]), [data-show-whitespace]) [data-whitespace-marker="space"] { color: transparent; background-image: radial-gradient(circle, color-mix(in srgb, var(--diffs-fg) 42%, transparent) 1px, transparent 1.2px); background-position: .5ch center; background-repeat: repeat-x; background-size: 1ch 100%; }
       :is(:host([data-show-whitespace]), [data-show-whitespace]) [data-whitespace-marker="tab"] { position: relative; color: transparent; }
       :is(:host([data-show-whitespace]), [data-show-whitespace]) [data-whitespace-marker="tab"]::before { content: "→"; position: absolute; inset-inline-start: 0; color: color-mix(in srgb, var(--diffs-fg) 48%, transparent); pointer-events: none; }
     `,
-    onPostRender: renderWhitespaceMarkers,
+    onPostRender(node) {
+      renderWhitespaceMarkers(node);
+      requestAnimationFrame(refreshSearchHighlights);
+    },
     onGutterUtilityClick(range, context) {
       createDraft(range, context.item.id);
     },
-  }), [createDraft, diffStyle, renderWhitespaceMarkers, tabSize, theme]);
+  }), [createDraft, diffStyle, refreshSearchHighlights, renderWhitespaceMarkers, tabSize, theme]);
 
   const saveLocalReply = useCallback((reply: LocalReply) => {
     setLocalReplies((current) => [...current.filter((entry) => entry.key !== reply.key), reply]);
@@ -1686,6 +1793,40 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
           </div>
         </div>
         {repositoryError && <div className="repository-error"><X size={13} /> <span>{repositoryError}</span><button onClick={() => setRepositoryError("")} aria-label="Dismiss"><X size={12} /></button></div>}
+        {searchOpen && (
+          <form
+            className="code-search"
+            role="search"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (searchMatches.length) setSearchIndex((current) => (current + 1) % searchMatches.length);
+            }}
+          >
+            <Search size={14} />
+            <input
+              ref={searchInputRef}
+              type="search"
+              aria-label="Find in diff"
+              placeholder="Find in diff"
+              value={searchQuery}
+              onChange={(event) => { setSearchQuery(event.target.value); setSearchIndex(0); }}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  setSearchOpen(false);
+                  setSearchQuery("");
+                } else if (event.key === "Enter" && event.shiftKey && searchMatches.length) {
+                  event.preventDefault();
+                  setSearchIndex((current) => (current - 1 + searchMatches.length) % searchMatches.length);
+                }
+              }}
+            />
+            <span>{searchQuery.trim() ? searchMatches.length ? `${Math.min(searchIndex + 1, searchMatches.length)} / ${searchMatches.length}` : "No results" : ""}</span>
+            <button type="button" disabled={!searchMatches.length} aria-label="Previous match" onClick={() => setSearchIndex((current) => (current - 1 + searchMatches.length) % searchMatches.length)}><ChevronUp size={13} /></button>
+            <button type="submit" disabled={!searchMatches.length} aria-label="Next match"><ChevronDown size={13} /></button>
+            <button type="button" aria-label="Close search" onClick={() => { setSearchOpen(false); setSearchQuery(""); }}><X size={13} /></button>
+          </form>
+        )}
         <div className="diff-toolbar pierre-toolbar">
           <span><strong>{files.length}</strong> files changed</span>
           <span className="comment-hint"><MessageSquare size={13} /> Select lines or click <b>+</b> in the gutter to comment</span>

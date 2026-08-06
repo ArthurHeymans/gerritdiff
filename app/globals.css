@@ -255,6 +255,12 @@ a { color: inherit; text-decoration: none; }
 .pierre-main .change-meta { margin-top: 7px; }
 .pierre-toolbar { position: relative; top: auto; flex: none; padding-inline: 20px; }
 .pierre-code-view { flex: 1; min-height: 0; width: 100%; overflow: auto; overscroll-behavior: contain; background: var(--panel); --diffs-font-family: "DM Mono", ui-monospace, monospace; }
+.code-search { position: absolute; top: 8px; right: 12px; z-index: 70; width: min(390px, calc(100% - 24px)); height: 36px; display: flex; align-items: center; gap: 5px; padding: 0 5px 0 10px; border: 1px solid var(--border); border-radius: 8px; color: var(--faint); background: var(--panel); box-shadow: 0 10px 30px rgba(0,0,0,.28); }
+.code-search input { min-width: 0; flex: 1; border: 0; outline: 0; color: var(--text); background: transparent; font: 10px "DM Mono", monospace; }
+.code-search > span { min-width: 54px; color: var(--faint); text-align: right; font-size: 9px; white-space: nowrap; }
+.code-search button { width: 25px; height: 25px; flex: none; display: grid; place-items: center; border: 0; border-radius: 5px; color: var(--muted); background: transparent; cursor: pointer; }
+.code-search button:hover:not(:disabled) { color: var(--text); background: var(--panel-3); }
+.code-search button:disabled { opacity: .35; cursor: default; }
 .comment-hint { display: inline-flex; align-items: center; gap: 6px; margin-left: 12px; color: var(--faint); }
 .comment-hint b { width: 16px; height: 16px; display: inline-grid; place-items: center; border: 1px solid var(--border); border-radius: 4px; color: var(--text); }
 .text-selection-comment { position: fixed; z-index: 60; height: 30px; display: inline-flex; align-items: center; gap: 6px; padding: 0 8px 0 10px; border: 1px solid color-mix(in srgb, var(--accent-strong) 58%, var(--border)); border-radius: 7px; color: #17131f; background: var(--accent-strong); box-shadow: 0 8px 24px rgba(0,0,0,.28); cursor: pointer; font: 800 10px Manrope, sans-serif; }

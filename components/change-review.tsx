@@ -20,6 +20,7 @@ import { FileTree, useFileTree } from "@pierre/trees/react";
 import { Check, ChevronDown, ChevronUp, CircleCheck, Columns2, Copy, FileText, GitBranch, LoaderCircle, MessageSquare, PanelLeftClose, PanelLeftOpen, Pencil, Pilcrow, Quote, Reply, Rows3, Search, Send, Settings2, Terminal, Trash2, X } from "lucide-react";
 import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type FileSnapshotOption, MovedCodeCompare } from "@/components/moved-code-compare";
 import { RepositoryBrowser } from "@/components/repository-browser";
 import type { ChangeData, GerritComment, RelatedChange } from "@/lib/types";
 import type { GerritDiffTheme } from "@/lib/theme";
@@ -812,6 +813,7 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchIndex, setSearchIndex] = useState(0);
+  const [movedCodeOpen, setMovedCodeOpen] = useState(false);
   const [selectedLines, setSelectedLines] = useState<CodeViewLineSelection | null>(null);
   const [codeTextSelection, setCodeTextSelection] = useState<CodeTextSelection | null>(null);
   const [diffStyle, setDiffStyle] = useState<"split" | "unified">("split");
@@ -915,6 +917,22 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
     () => new Map(files.map((file, index) => [file.name, `file-${index}`])),
     [files],
   );
+  const movedCodeFiles = useMemo(() => {
+    const collect = (side: "old" | "new") => {
+      const options = new Map<string, FileSnapshotOption>();
+      files.forEach((file, index) => {
+        if ((side === "old" && file.type === "new") || (side === "new" && file.type === "deleted")) return;
+        const comparison = data.comparisonFiles?.[index];
+        const path = side === "old" ? file.prevName ?? file.name : file.name;
+        const content = side === "old" ? comparison?.baseContent : comparison?.targetContent;
+        const score = side === "old" ? file.deletionLines.length : file.additionLines.length;
+        const current = options.get(path);
+        if (!current || score > current.score) options.set(path, { path, content, score });
+      });
+      return [...options.values()].toSorted((left, right) => left.path.localeCompare(right.path));
+    };
+    return { old: collect("old"), new: collect("new") };
+  }, [data.comparisonFiles, files]);
   const searchMatches = useMemo<SearchMatch[]>(() => {
     const query = searchQuery.trim().toLocaleLowerCase();
     if (!query) return [];
@@ -1831,6 +1849,20 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
           <span><strong>{files.length}</strong> files changed</span>
           <span className="comment-hint"><MessageSquare size={13} /> Select lines or click <b>+</b> in the gutter to comment</span>
           {localCommentCount > 0 && <span className="comment-count">{localCommentCount} local comment{localCommentCount === 1 ? "" : "s"}</span>}
+          <button
+            type="button"
+            className={`moved-code-toggle${movedCodeOpen ? " active" : ""}`}
+            aria-pressed={movedCodeOpen}
+            title="Compare the old state of one file with the new state of another"
+            onClick={() => {
+              setMovedCodeOpen((current) => !current);
+              setSearchOpen(false);
+              setSearchQuery("");
+              setCodeTextSelection(null);
+            }}
+          >
+            <Columns2 size={13} /> Compare files
+          </button>
           <details className="view-settings">
             <summary title="Diff display settings">
               <Settings2 size={14} />
@@ -1871,18 +1903,33 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
           <span className="summary-del">−{data.deletions}</span>
         </div>
         <WorkerPoolContextProvider poolOptions={WORKER_POOL_OPTIONS} highlighterOptions={WORKER_HIGHLIGHTER_OPTIONS}>
-          <CodeView<CommentMetadata>
-            ref={viewerRef}
-            containerRef={codeViewContainerRef}
-            initialItems={initialItems}
-            className="pierre-code-view"
-            options={options}
-            selectedLines={selectedLines}
-            onSelectedLinesChange={setSelectedLines}
-            renderAnnotation={renderAnnotation}
-            renderHeaderPrefix={renderHeaderPrefix}
-            renderHeaderMetadata={renderHeaderMetadata}
-          />
+          <div className="review-code-surface">
+            <CodeView<CommentMetadata>
+              ref={viewerRef}
+              containerRef={codeViewContainerRef}
+              initialItems={initialItems}
+              className="pierre-code-view"
+              options={options}
+              selectedLines={selectedLines}
+              onSelectedLinesChange={setSelectedLines}
+              renderAnnotation={renderAnnotation}
+              renderHeaderPrefix={renderHeaderPrefix}
+              renderHeaderMetadata={renderHeaderMetadata}
+            />
+            {movedCodeOpen && (
+              <MovedCodeCompare
+                key={`${data.revision}:${data.baseRevisionNumber ?? "parent"}`}
+                sourceUrl={data.sourceUrl}
+                oldFiles={movedCodeFiles.old}
+                newFiles={movedCodeFiles.new}
+                baseLabel={data.baseRevisionNumber ? `Patchset ${data.baseRevisionNumber}` : "Parent"}
+                targetLabel={`Patchset ${data.revisionNumber}`}
+                theme={theme}
+                tabSize={tabSize}
+                onClose={() => setMovedCodeOpen(false)}
+              />
+            )}
+          </div>
         </WorkerPoolContextProvider>
         {codeTextSelection && (
           <button

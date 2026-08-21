@@ -1,10 +1,33 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { AlertTriangle, ChevronDown, ChevronRight, ExternalLink, LoaderCircle, RefreshCw, Settings2 } from "lucide-react";
 import { Logo, ThemeButton, UrlForm } from "@/components/app-chrome";
 import { normalizeGerritServer } from "@/lib/gerrit-url";
 import type { DashboardChange, DashboardData, DashboardGroup, DashboardProfile, DashboardScope } from "@/lib/types";
+
+type DashboardViewState = {
+  scope: "all" | DashboardScope;
+  workState: "all" | DashboardGroup;
+  wipFilter: "all" | "wip" | "reviewable";
+  project: string;
+  topic: string;
+  sort: "priority" | "freshest" | "oldest";
+  activityAgeFilter: number;
+  scrollY: number;
+};
+
+const DEFAULT_VIEW_STATE: DashboardViewState = {
+  scope: "all",
+  workState: "all",
+  wipFilter: "all",
+  project: "all",
+  topic: "all",
+  sort: "priority",
+  activityAgeFilter: 0,
+  scrollY: 0,
+};
 
 const GROUPS: { id: DashboardGroup; label: string; hint: string }[] = [
   { id: "action", label: "Needs your action", hint: "explicit blockers, then oldest first" },
@@ -75,6 +98,46 @@ function displayServer(server: string) {
   return `${url.host}${url.pathname === "/" ? "" : url.pathname.replace(/\/$/, "")}`;
 }
 
+function viewStateKey(profile: DashboardProfile) {
+  return `gerritdiff:dashboard-view:${profile.server}:${profile.username}`;
+}
+
+function readViewState(profile: DashboardProfile): DashboardViewState {
+  if (typeof window === "undefined") return DEFAULT_VIEW_STATE;
+  try {
+    return { ...DEFAULT_VIEW_STATE, ...JSON.parse(window.sessionStorage.getItem(viewStateKey(profile)) ?? "{}") } as DashboardViewState;
+  } catch {
+    return DEFAULT_VIEW_STATE;
+  }
+}
+
+function saveViewState(profile: DashboardProfile, state: DashboardViewState) {
+  window.sessionStorage.setItem(viewStateKey(profile), JSON.stringify(state));
+}
+
+function dashboardDataKey(profile: DashboardProfile) {
+  return `gerritdiff:dashboard-data:v1:${profile.server}:${profile.username}`;
+}
+
+function readDashboardData(profile: DashboardProfile): DashboardData | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const data = JSON.parse(window.sessionStorage.getItem(dashboardDataKey(profile)) ?? "null") as DashboardData | null;
+    if (!data || Date.now() - Date.parse(data.fetchedAt) > 24 * 60 * 60 * 1_000) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function saveDashboardData(profile: DashboardProfile, data: DashboardData) {
+  try {
+    window.sessionStorage.setItem(dashboardDataKey(profile), JSON.stringify(data));
+  } catch {
+    // A full dashboard can exceed restrictive browser storage quotas; live data still works.
+  }
+}
+
 function confidenceLabel(change: DashboardChange) {
   if (change.evidence === "explicit") return "Reported directly by Gerrit";
   if (change.evidence === "derived") return "Computed from complete Gerrit data";
@@ -85,10 +148,12 @@ function confidenceLabel(change: DashboardChange) {
 function ChangeRow({
   change,
   abandonSelected,
+  onOpen,
   onToggleAbandon,
 }: {
   change: DashboardChange;
   abandonSelected: boolean;
+  onOpen(change: DashboardChange): void;
   onToggleAbandon(change: DashboardChange): void;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -97,7 +162,7 @@ function ChangeRow({
 
   return (
     <article className={`dashboard-change dashboard-change-${change.group} evidence-${change.evidence}${change.status === "WIP" ? " is-wip" : ""}`}>
-      <button className="dashboard-change-main" type="button" onClick={() => window.location.assign(`/?url=${encodeURIComponent(change.sourceUrl)}`)}>
+      <button className="dashboard-change-main" type="button" onClick={() => onOpen(change)}>
         <span className="dashboard-change-title">
           <strong>{change.subject}</strong>
           <small>{change.project} #{change.changeNumber}{change.patchset ? ` · PS${change.patchset}` : ""} · {scope}{change.status === "WIP" && <b className="dashboard-wip-badge">WIP</b>}{change.topic ? ` · ${change.topic}` : ""}{change.scopes.includes("reviewing") ? ` · ${change.owner.name}` : ""}</small>
@@ -119,7 +184,7 @@ function ChangeRow({
           <div><span>Topic</span><strong>{change.topic ?? "No topic"}</strong></div>
           <div><span>Updated</span><strong>{new Date(parseTime(change.updated)).toLocaleString()}</strong></div>
           <div className="dashboard-change-detail-actions">
-            <button type="button" onClick={() => window.location.assign(`/?url=${encodeURIComponent(change.sourceUrl)}`)}>Open diff</button>
+            <button type="button" onClick={() => onOpen(change)}>Open diff</button>
             <a href={change.sourceUrl} target="_blank" rel="noreferrer">Open in Gerrit <ExternalLink size={12} /></a>
             {change.scopes.includes("mine") && change.patchset && (
               <button type="button" className={abandonSelected ? "is-danger" : ""} onClick={() => onToggleAbandon(change)}>
@@ -152,12 +217,14 @@ function Group({
   changes,
   warning,
   abandonQueue,
+  onOpen,
   onToggleAbandon,
 }: {
   group: (typeof GROUPS)[number];
   changes: DashboardChange[];
   warning?: string;
   abandonQueue: Record<string, string>;
+  onOpen(change: DashboardChange): void;
   onToggleAbandon(change: DashboardChange): void;
 }) {
   return (
@@ -168,7 +235,7 @@ function Group({
       </div>
       <div className="dashboard-group-list">
         {changes.length > 0 ? changes.map((change) => (
-          <ChangeRow key={change.id} change={change} abandonSelected={Object.hasOwn(abandonQueue, change.id)} onToggleAbandon={onToggleAbandon} />
+          <ChangeRow key={change.id} change={change} abandonSelected={Object.hasOwn(abandonQueue, change.id)} onOpen={onOpen} onToggleAbandon={onToggleAbandon} />
         )) : (
           <div className="dashboard-group-empty">No changes in this group.</div>
         )}
@@ -178,20 +245,36 @@ function Group({
 }
 
 export function Dashboard({ profile, onForget }: { profile: DashboardProfile; onForget(): void }) {
-  const [data, setData] = useState<DashboardData | null>(null);
+  const router = useRouter();
+  const initialViewState = useMemo(() => readViewState(profile), [profile]);
+  const initialDashboardData = useMemo(() => readDashboardData(profile), [profile]);
+  const dataRef = useRef<DashboardData | null>(initialDashboardData);
+  const [data, setData] = useState<DashboardData | null>(initialDashboardData);
   const [error, setError] = useState("");
+  const [refreshError, setRefreshError] = useState("");
+  const [isRefreshing, setIsRefreshing] = useState(true);
   const [refresh, setRefresh] = useState(0);
-  const [scope, setScope] = useState<"all" | DashboardScope>("all");
-  const [workState, setWorkState] = useState<"all" | DashboardGroup>("all");
-  const [wipFilter, setWipFilter] = useState<"all" | "wip" | "reviewable">("all");
-  const [project, setProject] = useState("all");
-  const [topic, setTopic] = useState("all");
-  const [sort, setSort] = useState<"priority" | "freshest" | "oldest">("priority");
-  const [activityAgeFilter, setActivityAgeFilter] = useState(0);
+  const [scope, setScope] = useState<"all" | DashboardScope>(initialViewState.scope);
+  const [workState, setWorkState] = useState<"all" | DashboardGroup>(initialViewState.workState);
+  const [wipFilter, setWipFilter] = useState<"all" | "wip" | "reviewable">(initialViewState.wipFilter);
+  const [project, setProject] = useState(initialViewState.project);
+  const [topic, setTopic] = useState(initialViewState.topic);
+  const [sort, setSort] = useState<"priority" | "freshest" | "oldest">(initialViewState.sort);
+  const [activityAgeFilter, setActivityAgeFilter] = useState(initialViewState.activityAgeFilter);
   const [abandonQueue, setAbandonQueue] = useState<Record<string, string>>({});
   const [sshHost, setSshHost] = useState(() => normalizeGerritServer(profile.server).hostname);
   const [sshPort, setSshPort] = useState("29418");
   const [commandCopied, setCommandCopied] = useState(false);
+
+  useEffect(() => {
+    saveViewState(profile, { scope, workState, wipFilter, project, topic, sort, activityAgeFilter, scrollY: window.scrollY });
+  }, [activityAgeFilter, profile, project, scope, sort, topic, wipFilter, workState]);
+
+  useEffect(() => {
+    if (!data || initialViewState.scrollY <= 0) return;
+    const frame = requestAnimationFrame(() => window.scrollTo({ top: initialViewState.scrollY }));
+    return () => cancelAnimationFrame(frame);
+  }, [data, initialViewState.scrollY]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -201,16 +284,33 @@ export function Dashboard({ profile, onForget }: { profile: DashboardProfile; on
         if (!response.ok) throw new Error(body.error ?? "The dashboard could not be loaded.");
         return body as DashboardData;
       })
-      .then(setData)
+      .then((nextData) => {
+        dataRef.current = nextData;
+        setData(nextData);
+        saveDashboardData(profile, nextData);
+        setError("");
+        setRefreshError("");
+        setIsRefreshing(false);
+      })
       .catch((reason) => {
-        if (reason.name !== "AbortError") setError(reason.message);
+        if (reason.name === "AbortError") return;
+        if (dataRef.current) setRefreshError(reason.message);
+        else setError(reason.message);
+        setIsRefreshing(false);
       });
     return () => controller.abort();
-  }, [profile.server, profile.username, refresh]);
+  }, [profile, refresh]);
+
+  function openChange(change: DashboardChange) {
+    saveViewState(profile, { scope, workState, wipFilter, project, topic, sort, activityAgeFilter, scrollY: window.scrollY });
+    const query = new URLSearchParams({ url: change.sourceUrl, from: "dashboard" });
+    router.push(`/?${query}`);
+  }
 
   function reload() {
     setError("");
-    setData(null);
+    setRefreshError("");
+    setIsRefreshing(true);
     setRefresh((current) => current + 1);
   }
 
@@ -319,8 +419,8 @@ export function Dashboard({ profile, onForget }: { profile: DashboardProfile; on
         <div className="dashboard-shell">
         <div className="dashboard-heading">
           <div><h1>My work</h1><p>{stateCounts.action} need action · {stateCounts.unclear} need triage · public changes only</p></div>
-          <button type="button" className="dashboard-refresh" onClick={reload} disabled={!data && !error}>
-            <RefreshCw size={13} className={!data && !error ? "spinner" : ""} />
+          <button type="button" className="dashboard-refresh" onClick={reload} disabled={isRefreshing}>
+            <RefreshCw size={13} className={isRefreshing ? "spinner" : ""} />
             {data ? `Refreshed ${relativeAge(data.fetchedAt).label} ago` : "Refresh"}
           </button>
         </div>
@@ -365,6 +465,7 @@ export function Dashboard({ profile, onForget }: { profile: DashboardProfile; on
         {data?.warnings.length ? (
           <div className="dashboard-warning"><AlertTriangle size={14} /><div>{data.warnings.map((warning) => <p key={`${warning.source}:${warning.message}`}><b>{warning.source}:</b> {warning.message}</p>)}</div></div>
         ) : null}
+        {refreshError && <div className="dashboard-warning"><AlertTriangle size={14} /><div><p><b>Refresh:</b> {refreshError}. Showing the cached dashboard.</p></div></div>}
 
         {abandonChanges.length > 0 && (
           <section className="abandon-queue">
@@ -420,6 +521,7 @@ export function Dashboard({ profile, onForget }: { profile: DashboardProfile; on
                 changes={grouped[group.id]}
                 warning={group.id === "unclear" ? queryWarning?.message : undefined}
                 abandonQueue={abandonQueue}
+                onOpen={openChange}
                 onToggleAbandon={toggleAbandon}
               />
             ))}

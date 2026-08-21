@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ExternalLink, LoaderCircle } from "lucide-react";
+import { ExternalLink, LayoutDashboard, LoaderCircle } from "lucide-react";
 import { HomeLink, Logo, ThemeButton, UrlForm } from "@/components/app-chrome";
 import { ChangeReview } from "@/components/change-review";
 import { Dashboard, DashboardProfileForm } from "@/components/dashboard";
@@ -99,7 +99,7 @@ function patchsetUrl(sourceUrl: string, changeNumber: number, patchset: number) 
   return url.toString();
 }
 
-function Viewer({ data, initialThreadId, loading }: { data: ChangeData; initialThreadId?: string; loading: boolean }) {
+function Viewer({ data, initialThreadId, loading, fromDashboard }: { data: ChangeData; initialThreadId?: string; loading: boolean; fromDashboard: boolean }) {
   const theme = useGerritDiffTheme();
   const router = useRouter();
   const openComparison = (patchset: number, base?: number, threadId?: string) => {
@@ -107,6 +107,7 @@ function Viewer({ data, initialThreadId, loading }: { data: ChangeData; initialT
     const query = new URLSearchParams({ url });
     if (base !== undefined) query.set("base", String(base));
     if (threadId) query.set("thread", threadId);
+    if (fromDashboard) query.set("from", "dashboard");
     router.push(`/?${query}`, { scroll: false });
   };
   const openPatchset = (patchset: number, threadId?: string) => openComparison(patchset, data.baseRevisionNumber === patchset ? undefined : data.baseRevisionNumber, threadId);
@@ -116,6 +117,7 @@ function Viewer({ data, initialThreadId, loading }: { data: ChangeData; initialT
         <HomeLink />
         <UrlForm initial={data.sourceUrl} compact />
         <div className="topbar-actions">
+          {fromDashboard && <button type="button" className="source-link dashboard-return" onClick={() => router.push("/")}><LayoutDashboard size={14} /> Dashboard</button>}
           <a className="source-link" href={data.sourceUrl} target="_blank" rel="noreferrer">Gerrit <ExternalLink size={14} /></a>
           <ThemeButton />
         </div>
@@ -125,7 +127,7 @@ function Viewer({ data, initialThreadId, loading }: { data: ChangeData; initialT
   );
 }
 
-function ChangeLoader({ url, base, threadId }: { url: string; base?: string; threadId?: string }) {
+function ChangeLoader({ url, base, threadId, fromDashboard }: { url: string; base?: string; threadId?: string; fromDashboard: boolean }) {
   const [data, setData] = useState<ChangeData | null>(null);
   const [error, setError] = useState("");
   const [loadedRequest, setLoadedRequest] = useState<string | null>(null);
@@ -176,7 +178,7 @@ function ChangeLoader({ url, base, threadId }: { url: string; base?: string; thr
       <div className="state-card"><LoaderCircle className="spinner" size={30} /><h1>Loading change</h1><p>Fetching metadata and patch from Gerrit…</p></div>
     </main>
   );
-  return <Viewer data={data} initialThreadId={threadId} loading={loading} />;
+  return <Viewer data={data} initialThreadId={threadId} loading={loading} fromDashboard={fromDashboard} />;
 }
 
 export function GerritDiffApp() {
@@ -186,7 +188,8 @@ export function GerritDiffApp() {
   const url = searchParams.get("url");
   const base = searchParams.get("base") ?? undefined;
   const threadId = searchParams.get("thread") ?? undefined;
-  if (url) return <ChangeLoader url={url} base={base} threadId={threadId} />;
+  const fromDashboard = searchParams.get("from") === "dashboard";
+  if (url) return <ChangeLoader url={url} base={base} threadId={threadId} fromDashboard={fromDashboard} />;
   if (profile) return <Dashboard profile={profile} onForget={() => saveDashboardProfile(null)} />;
   return <Landing onSaveProfile={saveDashboardProfile} />;
 }

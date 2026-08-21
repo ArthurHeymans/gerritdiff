@@ -356,7 +356,9 @@ export async function GET(request: NextRequest) {
       changes,
       warnings,
     };
-    return NextResponse.json(data);
+    return NextResponse.json(data, {
+      headers: { "Cache-Control": "public, s-maxage=60, stale-while-revalidate=300" },
+    });
   } catch (reason) {
     return NextResponse.json({ error: reason instanceof Error ? reason.message : "The dashboard could not be loaded." }, { status: 400 });
   }

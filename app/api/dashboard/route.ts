@@ -218,6 +218,15 @@ function classifyReviewingChange(
   identity: Identity,
   attentionAvailable: boolean,
 ): Classification {
+  if (change.work_in_progress) {
+    return { group: "waiting", evidence: "explicit", diagnosis: "Waiting for the author to mark this ready for review" };
+  }
+  if (change.mergeable === false) {
+    return { group: "waiting", evidence: "explicit", diagnosis: "Waiting for the author to resolve a merge conflict" };
+  }
+  if (ciState(labels).state === "failed") {
+    return { group: "waiting", evidence: "explicit", diagnosis: "Waiting for the author to fix CI" };
+  }
   if (hasAttention(change, identity)) {
     return { group: "action", evidence: "explicit", diagnosis: "Gerrit requests your attention" };
   }
@@ -226,8 +235,12 @@ function classifyReviewingChange(
     const value = `${vote.value > 0 ? "+" : ""}${vote.value}`;
     return { group: "waiting", evidence: "derived", diagnosis: `Your ${vote.name} ${value} is on the current patchset` };
   }
+  const ci = ciState(labels);
   if (attentionAvailable) {
-    return { group: "unclear", evidence: "unknown", diagnosis: "No explicit turn signal; decide whether this needs review" };
+    const diagnosis = ci.state === "passed"
+      ? "Ready for review, but Gerrit has not requested your attention"
+      : "No explicit turn signal; decide whether this needs review";
+    return { group: "unclear", evidence: "unknown", diagnosis };
   }
   return { group: "unclear", evidence: "inferred", diagnosis: "Likely needs triage; attention data is unavailable" };
 }
@@ -289,9 +302,11 @@ function classify({
 
 export async function GET(request: NextRequest) {
   const serverInput = request.nextUrl.searchParams.get("server")?.trim();
-  const username = request.nextUrl.searchParams.get("username")?.trim();
+  const accountInput = request.nextUrl.searchParams.get("account")?.trim();
+  const accountId = accountInput && /^\d+$/.test(accountInput) ? Number(accountInput) : undefined;
+  const username = request.nextUrl.searchParams.get("username")?.trim() ?? accountInput;
   if (!serverInput || !username) {
-    return NextResponse.json({ error: "A Gerrit server URL and username are required." }, { status: 400 });
+    return NextResponse.json({ error: "A Gerrit server and public account identity are required." }, { status: 400 });
   }
   if (!/^[A-Za-z0-9._@+-]+$/.test(username)) {
     return NextResponse.json({ error: "Enter an exact Gerrit username, email, or numeric account ID." }, { status: 400 });
@@ -299,11 +314,14 @@ export async function GET(request: NextRequest) {
 
   try {
     const server = normalizeGerritServer(serverInput);
-    const identityPromise = resolveIdentity(server, username);
+    const identityQuery = accountId === undefined ? username : String(accountId);
+    const identityPromise = accountId === undefined
+      ? resolveIdentity(server, username)
+      : accountIdentity(server, username, accountId);
     const queries = await Promise.allSettled([
-      queryChanges(server, `owner:${username} status:open`),
-      queryChanges(server, `reviewer:${username} status:open`),
-      queryChanges(server, `attention:${username} status:open`),
+      queryChanges(server, `owner:${identityQuery} status:open`),
+      queryChanges(server, `reviewer:${identityQuery} status:open`),
+      queryChanges(server, `attention:${identityQuery} status:open`),
     ]);
     if (queries.every((result) => result.status === "rejected")) {
       const first = queries[0];

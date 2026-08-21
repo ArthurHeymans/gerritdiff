@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useSyncExternalStore } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { ExternalLink, LayoutDashboard, LoaderCircle } from "lucide-react";
 import { HomeLink, Logo, ThemeButton, UrlForm } from "@/components/app-chrome";
 import { ChangeReview } from "@/components/change-review";
@@ -46,7 +46,9 @@ function saveDashboardProfile(profile: DashboardProfile | null) {
 function parseDashboardProfile(value: string): DashboardProfile | null {
   try {
     const profile = JSON.parse(value) as Partial<DashboardProfile>;
-    return profile.server && profile.username ? { server: normalizeGerritServer(profile.server).toString(), username: profile.username } : null;
+    return profile.server && profile.username
+      ? { server: normalizeGerritServer(profile.server).toString(), username: profile.username, accountId: profile.accountId }
+      : null;
   } catch {
     return null;
   }
@@ -99,7 +101,7 @@ function patchsetUrl(sourceUrl: string, changeNumber: number, patchset: number) 
   return url.toString();
 }
 
-function Viewer({ data, initialThreadId, loading, fromDashboard }: { data: ChangeData; initialThreadId?: string; loading: boolean; fromDashboard: boolean }) {
+function Viewer({ data, initialThreadId, loading, returnTo }: { data: ChangeData; initialThreadId?: string; loading: boolean; returnTo?: string }) {
   const theme = useGerritDiffTheme();
   const router = useRouter();
   const openComparison = (patchset: number, base?: number, threadId?: string) => {
@@ -107,7 +109,7 @@ function Viewer({ data, initialThreadId, loading, fromDashboard }: { data: Chang
     const query = new URLSearchParams({ url });
     if (base !== undefined) query.set("base", String(base));
     if (threadId) query.set("thread", threadId);
-    if (fromDashboard) query.set("from", "dashboard");
+    if (returnTo) query.set("return", returnTo);
     router.push(`/?${query}`, { scroll: false });
   };
   const openPatchset = (patchset: number, threadId?: string) => openComparison(patchset, data.baseRevisionNumber === patchset ? undefined : data.baseRevisionNumber, threadId);
@@ -117,7 +119,7 @@ function Viewer({ data, initialThreadId, loading, fromDashboard }: { data: Chang
         <HomeLink />
         <UrlForm initial={data.sourceUrl} compact />
         <div className="topbar-actions">
-          {fromDashboard && <button type="button" className="source-link dashboard-return" onClick={() => router.push("/")}><LayoutDashboard size={14} /> Dashboard</button>}
+          {returnTo && <button type="button" className="source-link dashboard-return" onClick={() => router.push(returnTo)}><LayoutDashboard size={14} /> Dashboard</button>}
           <a className="source-link" href={data.sourceUrl} target="_blank" rel="noreferrer">Gerrit <ExternalLink size={14} /></a>
           <ThemeButton />
         </div>
@@ -127,7 +129,7 @@ function Viewer({ data, initialThreadId, loading, fromDashboard }: { data: Chang
   );
 }
 
-function ChangeLoader({ url, base, threadId, fromDashboard }: { url: string; base?: string; threadId?: string; fromDashboard: boolean }) {
+function ChangeLoader({ url, base, threadId, returnTo }: { url: string; base?: string; threadId?: string; returnTo?: string }) {
   const [data, setData] = useState<ChangeData | null>(null);
   const [error, setError] = useState("");
   const [loadedRequest, setLoadedRequest] = useState<string | null>(null);
@@ -178,18 +180,46 @@ function ChangeLoader({ url, base, threadId, fromDashboard }: { url: string; bas
       <div className="state-card"><LoaderCircle className="spinner" size={30} /><h1>Loading change</h1><p>Fetching metadata and patch from Gerrit…</p></div>
     </main>
   );
-  return <Viewer data={data} initialThreadId={threadId} loading={loading} fromDashboard={fromDashboard} />;
+  return <Viewer data={data} initialThreadId={threadId} loading={loading} returnTo={returnTo} />;
 }
 
 export function GerritDiffApp() {
+  const router = useRouter();
+  const pathname = usePathname();
   const searchParams = useSearchParams();
   const profileValue = useSyncExternalStore(subscribeDashboardProfile, dashboardProfileSnapshot, () => "");
-  const profile = parseDashboardProfile(profileValue);
+  const localProfile = parseDashboardProfile(profileValue);
+  const sharedServer = searchParams.get("server");
+  const sharedUser = searchParams.get("user");
+  const sharedAccount = searchParams.get("account");
+  let profile = localProfile;
+  let sharedIdentity = false;
+  if (pathname === "/dashboard" && sharedServer && (sharedUser || sharedAccount)) {
+    try {
+      profile = {
+        server: normalizeGerritServer(sharedServer).toString(),
+        username: sharedUser ?? sharedAccount ?? "",
+        accountId: sharedAccount && /^\d+$/.test(sharedAccount) ? Number(sharedAccount) : undefined,
+      };
+      sharedIdentity = !localProfile
+        || localProfile.server !== profile.server
+        || localProfile.username !== profile.username;
+    } catch {
+      profile = null;
+    }
+  }
   const url = searchParams.get("url");
   const base = searchParams.get("base") ?? undefined;
   const threadId = searchParams.get("thread") ?? undefined;
-  const fromDashboard = searchParams.get("from") === "dashboard";
-  if (url) return <ChangeLoader url={url} base={base} threadId={threadId} fromDashboard={fromDashboard} />;
-  if (profile) return <Dashboard profile={profile} onForget={() => saveDashboardProfile(null)} />;
-  return <Landing onSaveProfile={saveDashboardProfile} />;
+  const requestedReturn = searchParams.get("return");
+  const returnTo = requestedReturn?.startsWith("/dashboard") ? requestedReturn : undefined;
+  const saveAndOpenDashboard = (nextProfile: DashboardProfile) => {
+    saveDashboardProfile(nextProfile);
+    const preservedView = pathname === "/dashboard" ? searchParams.toString() : "";
+    router.push(preservedView ? `/dashboard?${preservedView}` : "/dashboard");
+  };
+  if (url) return <ChangeLoader url={url} base={base} threadId={threadId} returnTo={returnTo} />;
+  if (searchParams.get("setup") === "1") return <Landing onSaveProfile={saveAndOpenDashboard} />;
+  if (profile) return <Dashboard profile={profile} sharedIdentity={sharedIdentity} onForget={sharedIdentity ? () => router.push("/?setup=1") : () => saveDashboardProfile(null)} />;
+  return <Landing onSaveProfile={saveAndOpenDashboard} />;
 }

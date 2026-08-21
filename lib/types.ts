@@ -51,6 +51,7 @@ export type GerritReviewer = {
 export type DashboardProfile = {
   server: string;
   username: string;
+  accountId?: number;
 };
 
 export type DashboardScope = "mine" | "reviewing";

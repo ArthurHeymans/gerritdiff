@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
-import { AlertTriangle, ChevronDown, ChevronRight, ExternalLink, LoaderCircle, RefreshCw, Settings2 } from "lucide-react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { AlertTriangle, ChevronDown, ChevronRight, ExternalLink, LoaderCircle, RefreshCw, Settings2, Share2 } from "lucide-react";
 import { Logo, ThemeButton, UrlForm } from "@/components/app-chrome";
 import { normalizeGerritServer } from "@/lib/gerrit-url";
 import type { DashboardChange, DashboardData, DashboardGroup, DashboardProfile, DashboardScope } from "@/lib/types";
@@ -28,6 +28,51 @@ const DEFAULT_VIEW_STATE: DashboardViewState = {
   activityAgeFilter: 0,
   scrollY: 0,
 };
+
+function parseActivityAge(value: string | null, fallback: number) {
+  if (!value) return fallback;
+  const [kind, amount] = value.split(":");
+  const days = Number(amount);
+  if (!Number.isFinite(days) || days < 0) return fallback;
+  if (kind === "recent") return -days;
+  if (kind === "inactive") return days;
+  return fallback;
+}
+
+function readUrlViewState(searchParams: Pick<URLSearchParams, "get">, fallback: DashboardViewState): DashboardViewState {
+  const scope = searchParams.get("scope");
+  const workState = searchParams.get("state");
+  const wipFilter = searchParams.get("wip");
+  const sort = searchParams.get("sort");
+  return {
+    ...fallback,
+    scope: scope === "mine" || scope === "reviewing" ? scope : fallback.scope,
+    workState: GROUPS.some((group) => group.id === workState) ? workState as DashboardGroup : fallback.workState,
+    wipFilter: wipFilter === "wip" || wipFilter === "reviewable" ? wipFilter : fallback.wipFilter,
+    project: searchParams.get("project") ?? fallback.project,
+    topic: searchParams.get("topic") ?? fallback.topic,
+    sort: sort === "freshest" || sort === "oldest" ? sort : fallback.sort,
+    activityAgeFilter: parseActivityAge(searchParams.get("age"), fallback.activityAgeFilter),
+  };
+}
+
+function dashboardSearchParams(profile: DashboardProfile, state: DashboardViewState, accountId?: number, includeIdentity = true) {
+  const params = new URLSearchParams();
+  if (includeIdentity) {
+    params.set("server", profile.server);
+    params.set("user", profile.username);
+    if (accountId !== undefined) params.set("account", String(accountId));
+  }
+  if (state.scope !== "all") params.set("scope", state.scope);
+  if (state.workState !== "all") params.set("state", state.workState);
+  if (state.wipFilter !== "all") params.set("wip", state.wipFilter);
+  if (state.project !== "all") params.set("project", state.project);
+  if (state.topic !== "all") params.set("topic", state.topic);
+  if (state.sort !== "priority") params.set("sort", state.sort);
+  if (state.activityAgeFilter > 0) params.set("age", `inactive:${state.activityAgeFilter}`);
+  if (state.activityAgeFilter < 0) params.set("age", `recent:${Math.abs(state.activityAgeFilter)}`);
+  return params;
+}
 
 const GROUPS: { id: DashboardGroup; label: string; hint: string }[] = [
   { id: "action", label: "Needs your action", hint: "explicit blockers, then oldest first" },
@@ -99,7 +144,7 @@ function displayServer(server: string) {
 }
 
 function viewStateKey(profile: DashboardProfile) {
-  return `gerritdiff:dashboard-view:${profile.server}:${profile.username}`;
+  return `gerritdiff:dashboard-view:${profile.server}:${profile.accountId ?? profile.username}`;
 }
 
 function readViewState(profile: DashboardProfile): DashboardViewState {
@@ -116,7 +161,7 @@ function saveViewState(profile: DashboardProfile, state: DashboardViewState) {
 }
 
 function dashboardDataKey(profile: DashboardProfile) {
-  return `gerritdiff:dashboard-data:v1:${profile.server}:${profile.username}`;
+  return `gerritdiff:dashboard-data:v1:${profile.server}:${profile.accountId ?? profile.username}`;
 }
 
 function readDashboardData(profile: DashboardProfile): DashboardData | null {
@@ -244,9 +289,11 @@ function Group({
   );
 }
 
-export function Dashboard({ profile, onForget }: { profile: DashboardProfile; onForget(): void }) {
+export function Dashboard({ profile, onForget, sharedIdentity = false }: { profile: DashboardProfile; onForget(): void; sharedIdentity?: boolean }) {
   const router = useRouter();
-  const initialViewState = useMemo(() => readViewState(profile), [profile]);
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const initialViewState = useMemo(() => readUrlViewState(searchParams, readViewState(profile)), [profile, searchParams]);
   const initialDashboardData = useMemo(() => readDashboardData(profile), [profile]);
   const dataRef = useRef<DashboardData | null>(initialDashboardData);
   const [data, setData] = useState<DashboardData | null>(initialDashboardData);
@@ -265,10 +312,15 @@ export function Dashboard({ profile, onForget }: { profile: DashboardProfile; on
   const [sshHost, setSshHost] = useState(() => normalizeGerritServer(profile.server).hostname);
   const [sshPort, setSshPort] = useState("29418");
   const [commandCopied, setCommandCopied] = useState(false);
+  const [shareCopied, setShareCopied] = useState<"exact" | "filters" | null>(null);
 
   useEffect(() => {
-    saveViewState(profile, { scope, workState, wipFilter, project, topic, sort, activityAgeFilter, scrollY: window.scrollY });
-  }, [activityAgeFilter, profile, project, scope, sort, topic, wipFilter, workState]);
+    const state = { scope, workState, wipFilter, project, topic, sort, activityAgeFilter, scrollY: window.scrollY };
+    saveViewState(profile, state);
+    const canonical = dashboardSearchParams(profile, state, data?.identity.accountId ?? profile.accountId);
+    const target = `/dashboard?${canonical}`;
+    if (pathname !== "/dashboard" || searchParams.toString() !== canonical.toString()) router.replace(target, { scroll: false });
+  }, [activityAgeFilter, data?.identity.accountId, pathname, profile, project, router, scope, searchParams, sort, topic, wipFilter, workState]);
 
   useEffect(() => {
     if (!data || initialViewState.scrollY <= 0) return;
@@ -278,7 +330,8 @@ export function Dashboard({ profile, onForget }: { profile: DashboardProfile; on
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch(`/api/dashboard?server=${encodeURIComponent(profile.server)}&username=${encodeURIComponent(profile.username)}`, { signal: controller.signal })
+    const identityQuery = profile.accountId === undefined ? "" : `&account=${profile.accountId}`;
+    fetch(`/api/dashboard?server=${encodeURIComponent(profile.server)}&username=${encodeURIComponent(profile.username)}${identityQuery}`, { signal: controller.signal })
       .then(async (response) => {
         const body = await response.json();
         if (!response.ok) throw new Error(body.error ?? "The dashboard could not be loaded.");
@@ -301,10 +354,27 @@ export function Dashboard({ profile, onForget }: { profile: DashboardProfile; on
     return () => controller.abort();
   }, [profile, refresh]);
 
+  function currentViewState(): DashboardViewState {
+    return { scope, workState, wipFilter, project, topic, sort, activityAgeFilter, scrollY: window.scrollY };
+  }
+
   function openChange(change: DashboardChange) {
-    saveViewState(profile, { scope, workState, wipFilter, project, topic, sort, activityAgeFilter, scrollY: window.scrollY });
-    const query = new URLSearchParams({ url: change.sourceUrl, from: "dashboard" });
+    const state = currentViewState();
+    saveViewState(profile, state);
+    const returnTo = `/dashboard?${dashboardSearchParams(profile, state, data?.identity.accountId ?? profile.accountId)}`;
+    const query = new URLSearchParams({ url: change.sourceUrl, return: returnTo });
     router.push(`/?${query}`);
+  }
+
+  async function copyDashboardLink(kind: "exact" | "filters") {
+    const params = dashboardSearchParams(profile, currentViewState(), data?.identity.accountId ?? profile.accountId, kind === "exact");
+    const url = new URL(`/dashboard?${params}`, window.location.origin);
+    try {
+      await navigator.clipboard.writeText(url.toString());
+      setShareCopied(kind);
+    } catch {
+      setShareCopied(null);
+    }
   }
 
   function reload() {
@@ -382,7 +452,7 @@ export function Dashboard({ profile, onForget }: { profile: DashboardProfile; on
         <Logo />
         <UrlForm compact />
         <div className="dashboard-topbar-actions">
-          <span className="dashboard-identity"><b>{displayServer(profile.server)}</b><small>Viewing as {data?.identity.name ?? profile.username}</small></span>
+          <span className="dashboard-identity"><b>{displayServer(profile.server)}</b><small>{sharedIdentity ? "Viewing shared dashboard as" : "Viewing as"} {data?.identity.name ?? profile.username}</small></span>
           <button className="icon-button" type="button" aria-label="Change dashboard profile" onClick={onForget}><Settings2 size={16} /></button>
           <ThemeButton />
         </div>
@@ -419,10 +489,14 @@ export function Dashboard({ profile, onForget }: { profile: DashboardProfile; on
         <div className="dashboard-shell">
         <div className="dashboard-heading">
           <div><h1>My work</h1><p>{stateCounts.action} need action · {stateCounts.unclear} need triage · public changes only</p></div>
-          <button type="button" className="dashboard-refresh" onClick={reload} disabled={isRefreshing}>
-            <RefreshCw size={13} className={isRefreshing ? "spinner" : ""} />
-            {data ? `Refreshed ${relativeAge(data.fetchedAt).label} ago` : "Refresh"}
-          </button>
+          <div className="dashboard-heading-actions">
+            <button type="button" onClick={() => copyDashboardLink("exact")}><Share2 size={13} /> {shareCopied === "exact" ? "Copied exact view" : "Share exact view"}</button>
+            <button type="button" onClick={() => copyDashboardLink("filters")}><Share2 size={13} /> {shareCopied === "filters" ? "Copied filter view" : "Share filters"}</button>
+            <button type="button" className="dashboard-refresh" onClick={reload} disabled={isRefreshing}>
+              <RefreshCw size={13} className={isRefreshing ? "spinner" : ""} />
+              {data ? `Refreshed ${relativeAge(data.fetchedAt).label} ago` : "Refresh"}
+            </button>
+          </div>
         </div>
 
         <div className="dashboard-controls">

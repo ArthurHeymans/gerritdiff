@@ -22,6 +22,7 @@ import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type FileSnapshotOption, MovedCodeCompare } from "@/components/moved-code-compare";
 import { RepositoryBrowser } from "@/components/repository-browser";
+import { createCodeViewDiffOptions, textMatchRanges, textPosition, updateWhitespaceMarkers } from "@/lib/code-view";
 import type { ChangeData, GerritComment, RelatedChange } from "@/lib/types";
 import type { GerritDiffTheme } from "@/lib/theme";
 
@@ -93,6 +94,7 @@ type ProjectUiSettings = {
   tabSize?: number;
   diffStyle?: "split" | "unified";
   showWhitespace?: boolean;
+  ignoreIndentation?: boolean;
   sidebarCollapsed?: boolean;
   sidebarMode?: "changed" | "repository" | "discussion";
 };
@@ -116,40 +118,6 @@ function saveProjectUiSettings(host: string, project: string, update: Partial<Pr
     window.localStorage.setItem(projectUiStorageKey(host, project), JSON.stringify(settings));
   } catch {
     // Storage may be unavailable in privacy-restricted browser contexts.
-  }
-}
-
-function updateWhitespaceMarkers(root: HTMLElement | ShadowRoot, visible: boolean) {
-  const markerRoot = root instanceof ShadowRoot ? root.host : root;
-  markerRoot.toggleAttribute("data-show-whitespace", visible);
-  if (!visible) return;
-
-  const lines = root instanceof HTMLElement && root.matches("[data-line]")
-    ? [root]
-    : Array.from(root.querySelectorAll<HTMLElement>("[data-line]"));
-  for (const line of lines) {
-    const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT);
-    const textNodes: Text[] = [];
-    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-      if (node.parentElement?.closest("[data-whitespace-marker]")) continue;
-      if (/[ \t]/.test(node.textContent ?? "")) textNodes.push(node as Text);
-    }
-    for (const textNode of textNodes) {
-      const text = textNode.data;
-      const fragment = document.createDocumentFragment();
-      for (const part of text.split(/( +|\t)/)) {
-        if (!part) continue;
-        if (part === "\t" || /^ +$/.test(part)) {
-          const marker = document.createElement("span");
-          marker.dataset.whitespaceMarker = part === "\t" ? "tab" : "space";
-          marker.textContent = part;
-          fragment.append(marker);
-        } else {
-          fragment.append(part);
-        }
-      }
-      textNode.replaceWith(fragment);
-    }
   }
 }
 
@@ -284,36 +252,6 @@ function textRangeLabel(range: GerritTextRange) {
   return range.start_line === range.end_line
     ? `Line ${range.start_line}, characters ${range.start_character + 1}–${range.end_character}`
     : `Lines ${range.start_line}:${range.start_character + 1}–${range.end_line}:${range.end_character}`;
-}
-
-function textPosition(line: HTMLElement, character: number) {
-  const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT);
-  let remaining = Math.max(0, character);
-  let last: Text | undefined;
-  while (walker.nextNode()) {
-    const node = walker.currentNode as Text;
-    last = node;
-    if (remaining <= node.data.length) return { node, offset: remaining };
-    remaining -= node.data.length;
-  }
-  return last ? { node: last, offset: last.data.length } : { node: line, offset: 0 };
-}
-
-function textMatchRanges(line: HTMLElement, query: string) {
-  const normalizedText = (line.textContent ?? "").toLocaleLowerCase();
-  const normalizedQuery = query.toLocaleLowerCase();
-  const ranges: Range[] = [];
-  let index = normalizedText.indexOf(normalizedQuery);
-  while (index >= 0) {
-    const start = textPosition(line, index);
-    const end = textPosition(line, index + query.length);
-    const range = document.createRange();
-    range.setStart(start.node, start.offset);
-    range.setEnd(end.node, end.offset);
-    ranges.push(range);
-    index = normalizedText.indexOf(normalizedQuery, index + Math.max(query.length, 1));
-  }
-  return ranges;
 }
 
 function highlightedTextRanges(root: ShadowRoot, textRange: GerritTextRange, side: "deletions" | "additions", isDiff: boolean) {
@@ -818,6 +756,7 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
   const [codeTextSelection, setCodeTextSelection] = useState<CodeTextSelection | null>(null);
   const [diffStyle, setDiffStyle] = useState<"split" | "unified">("split");
   const [showWhitespace, setShowWhitespace] = useState(false);
+  const [ignoreIndentation, setIgnoreIndentation] = useState(true);
   const [tabSize, setTabSize] = useState(2);
   const [sidebarMode, setSidebarMode] = useState<"changed" | "repository" | "discussion">("changed");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -925,9 +864,9 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
         const comparison = data.comparisonFiles?.[index];
         const path = side === "old" ? file.prevName ?? file.name : file.name;
         const content = side === "old" ? comparison?.baseContent : comparison?.targetContent;
-        const score = side === "old" ? file.deletionLines.length : file.additionLines.length;
+        const score = file.hunks.reduce((total, hunk) => total + (side === "old" ? hunk.deletionLines : hunk.additionLines), 0);
         const current = options.get(path);
-        if (!current || score > current.score) options.set(path, { path, content, score });
+        options.set(path, { path, content: current?.content ?? content, score: Math.max(current?.score ?? 0, score) });
       });
       return [...options.values()].toSorted((left, right) => left.path.localeCompare(right.path));
     };
@@ -956,20 +895,21 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
 
   useEffect(() => {
     const handleFindShortcut = (event: KeyboardEvent) => {
-      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.key.toLowerCase() !== "f") return;
+      if (movedCodeOpen || !(event.ctrlKey || event.metaKey) || event.altKey || event.key.toLowerCase() !== "f") return;
       event.preventDefault();
       setSearchOpen(true);
       requestAnimationFrame(() => searchInputRef.current?.focus());
     };
     window.addEventListener("keydown", handleFindShortcut);
     return () => window.removeEventListener("keydown", handleFindShortcut);
-  }, []);
+  }, [movedCodeOpen]);
 
   useEffect(() => {
     const settings = readProjectUiSettings(data.host, data.project);
     const frame = requestAnimationFrame(() => {
       setTabSize(settings.tabSize === 4 || settings.tabSize === 8 ? settings.tabSize : 2);
       setShowWhitespace(settings.showWhitespace ?? false);
+      setIgnoreIndentation(settings.ignoreIndentation ?? true);
       setSidebarCollapsed(settings.sidebarCollapsed ?? false);
       if (settings.sidebarMode === "repository" || settings.sidebarMode === "discussion") setSidebarMode(settings.sidebarMode);
       else setSidebarMode("changed");
@@ -1299,10 +1239,6 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
     setSelectedLines((current) => current?.id === selection.id && areSelectionsEqual(current.range, selection.range) ? null : selection);
   }, []);
 
-  const renderWhitespaceMarkers = useCallback((node: HTMLElement) => {
-    updateWhitespaceMarkers(node, showWhitespace);
-  }, [showWhitespace]);
-
   useEffect(() => {
     for (const rendered of viewerRef.current?.getInstance()?.getRenderedItems() ?? []) {
       const root = rendered.element.shadowRoot;
@@ -1311,35 +1247,29 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
   }, [showWhitespace]);
 
   const options = useMemo<CodeViewOptions<CommentMetadata>>(() => ({
+    ...createCodeViewDiffOptions<CommentMetadata>({
+      theme,
+      diffStyle,
+      tabSize,
+      unsafeCSS: `
+        ::highlight(${COMMENT_HIGHLIGHT_NAME}) { background-color: rgba(231, 177, 54, .38); text-decoration: underline 1px rgba(245, 198, 83, .9); text-underline-offset: 2px; }
+        ::highlight(${SEARCH_HIGHLIGHT_NAME}) { color: #17131f; background-color: rgba(255, 214, 72, .72); }
+        ::highlight(${ACTIVE_SEARCH_HIGHLIGHT_NAME}) { color: #17131f; background-color: #ff9f43; text-decoration: underline 2px #7a3d00; text-underline-offset: 2px; }
+      `,
+    }),
     layout: { paddingTop: 0, gap: 1, paddingBottom: 0 },
-    themeType: theme,
-    theme: theme === "dark" ? "pierre-dark" : "pierre-light",
-    diffStyle,
-    diffIndicators: "bars",
-    overflow: "scroll",
-    lineDiffType: "word-alt",
     lineHoverHighlight: "number",
     enableLineSelection: true,
     enableGutterUtility: true,
     stickyHeaders: true,
-    hunkSeparators: "line-info-basic",
-    unsafeCSS: `
-      :host { --diffs-tab-size: ${tabSize}; }
-      ::highlight(${COMMENT_HIGHLIGHT_NAME}) { background-color: rgba(231, 177, 54, .38); text-decoration: underline 1px rgba(245, 198, 83, .9); text-underline-offset: 2px; }
-      ::highlight(${SEARCH_HIGHLIGHT_NAME}) { color: #17131f; background-color: rgba(255, 214, 72, .72); }
-      ::highlight(${ACTIVE_SEARCH_HIGHLIGHT_NAME}) { color: #17131f; background-color: #ff9f43; text-decoration: underline 2px #7a3d00; text-underline-offset: 2px; }
-      :is(:host([data-show-whitespace]), [data-show-whitespace]) [data-whitespace-marker="space"] { color: transparent; background-image: radial-gradient(circle, color-mix(in srgb, var(--diffs-fg) 42%, transparent) 1px, transparent 1.2px); background-position: .5ch center; background-repeat: repeat-x; background-size: 1ch 100%; }
-      :is(:host([data-show-whitespace]), [data-show-whitespace]) [data-whitespace-marker="tab"] { position: relative; color: transparent; }
-      :is(:host([data-show-whitespace]), [data-show-whitespace]) [data-whitespace-marker="tab"]::before { content: "→"; position: absolute; inset-inline-start: 0; color: color-mix(in srgb, var(--diffs-fg) 48%, transparent); pointer-events: none; }
-    `,
     onPostRender(node) {
-      renderWhitespaceMarkers(node);
+      updateWhitespaceMarkers(node, showWhitespace);
       requestAnimationFrame(refreshSearchHighlights);
     },
     onGutterUtilityClick(range, context) {
       createDraft(range, context.item.id);
     },
-  }), [createDraft, diffStyle, refreshSearchHighlights, renderWhitespaceMarkers, tabSize, theme]);
+  }), [createDraft, diffStyle, refreshSearchHighlights, showWhitespace, tabSize, theme]);
 
   const saveLocalReply = useCallback((reply: LocalReply) => {
     setLocalReplies((current) => [...current.filter((entry) => entry.key !== reply.key), reply]);
@@ -1870,13 +1800,21 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
               <ChevronDown className="view-settings-chevron" size={12} />
             </summary>
             <div className="view-settings-menu">
-              <div className="view-settings-row view-layout-setting">
-                <span>Layout</span>
-                <div>
-                  <button type="button" className={diffStyle === "split" ? "active" : ""} aria-pressed={diffStyle === "split"} onClick={() => { setDiffStyle("split"); saveProjectUiSettings(data.host, data.project, { diffStyle: "split" }); }}><Columns2 size={13} /> Side by side</button>
-                  <button type="button" className={diffStyle === "unified" ? "active" : ""} aria-pressed={diffStyle === "unified"} onClick={() => { setDiffStyle("unified"); saveProjectUiSettings(data.host, data.project, { diffStyle: "unified" }); }}><Rows3 size={13} /> Unified</button>
+              {!movedCodeOpen && (
+                <div className="view-settings-row view-layout-setting">
+                  <span>Layout</span>
+                  <div>
+                    <button type="button" className={diffStyle === "split" ? "active" : ""} aria-pressed={diffStyle === "split"} onClick={() => { setDiffStyle("split"); saveProjectUiSettings(data.host, data.project, { diffStyle: "split" }); }}><Columns2 size={13} /> Side by side</button>
+                    <button type="button" className={diffStyle === "unified" ? "active" : ""} aria-pressed={diffStyle === "unified"} onClick={() => { setDiffStyle("unified"); saveProjectUiSettings(data.host, data.project, { diffStyle: "unified" }); }}><Rows3 size={13} /> Unified</button>
+                  </div>
                 </div>
-              </div>
+              )}
+              {movedCodeOpen && (
+                <label className="view-settings-row">
+                  <span>Ignore indentation</span>
+                  <input type="checkbox" checked={ignoreIndentation} onChange={(event) => { setIgnoreIndentation(event.target.checked); saveProjectUiSettings(data.host, data.project, { ignoreIndentation: event.target.checked }); }} />
+                </label>
+              )}
               <label className="view-settings-row">
                 <span><Pilcrow size={13} /> Show whitespace</span>
                 <input type="checkbox" checked={showWhitespace} onChange={(event) => { setShowWhitespace(event.target.checked); saveProjectUiSettings(data.host, data.project, { showWhitespace: event.target.checked }); }} />
@@ -1926,6 +1864,8 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
                 targetLabel={`Patchset ${data.revisionNumber}`}
                 theme={theme}
                 tabSize={tabSize}
+                showWhitespace={showWhitespace}
+                ignoreIndentation={ignoreIndentation}
                 onClose={() => setMovedCodeOpen(false)}
               />
             )}

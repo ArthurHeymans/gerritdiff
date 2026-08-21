@@ -1,11 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { AlertTriangle, ChevronDown, ChevronRight, ExternalLink, LoaderCircle, RefreshCw, Settings2, Share2 } from "lucide-react";
 import { Logo, ThemeButton, UrlForm } from "@/components/app-chrome";
 import { normalizeGerritServer } from "@/lib/gerrit-url";
-import type { DashboardChange, DashboardData, DashboardGroup, DashboardProfile, DashboardScope } from "@/lib/types";
+import type { DashboardChange, DashboardData, DashboardGroup, DashboardOwnership, DashboardProfile, DashboardScope } from "@/lib/types";
 
 type DashboardViewState = {
   scope: "all" | DashboardScope;
@@ -160,14 +160,28 @@ function saveViewState(profile: DashboardProfile, state: DashboardViewState) {
   window.sessionStorage.setItem(viewStateKey(profile), JSON.stringify(state));
 }
 
+const DASHBOARD_DATA_EVENT = "gerritdiff:dashboard-data-change";
+
 function dashboardDataKey(profile: DashboardProfile) {
-  return `gerritdiff:dashboard-data:v1:${profile.server}:${profile.accountId ?? profile.username}`;
+  return `gerritdiff:dashboard-data:v3:${profile.server}:${profile.accountId ?? profile.username}`;
 }
 
-function readDashboardData(profile: DashboardProfile): DashboardData | null {
-  if (typeof window === "undefined") return null;
+function subscribeDashboardData(listener: () => void) {
+  window.addEventListener(DASHBOARD_DATA_EVENT, listener);
+  return () => window.removeEventListener(DASHBOARD_DATA_EVENT, listener);
+}
+
+function subscribeHydration() {
+  return () => {};
+}
+
+function dashboardDataSnapshot(profile: DashboardProfile) {
+  return window.sessionStorage.getItem(dashboardDataKey(profile)) ?? "";
+}
+
+function parseDashboardDataSnapshot(value: string): DashboardData | null {
   try {
-    const data = JSON.parse(window.sessionStorage.getItem(dashboardDataKey(profile)) ?? "null") as DashboardData | null;
+    const data = JSON.parse(value || "null") as DashboardData | null;
     if (!data || Date.now() - Date.parse(data.fetchedAt) > 24 * 60 * 60 * 1_000) return null;
     return data;
   } catch {
@@ -175,12 +189,30 @@ function readDashboardData(profile: DashboardProfile): DashboardData | null {
   }
 }
 
+function readDashboardData(profile: DashboardProfile) {
+  if (typeof window === "undefined") return null;
+  return parseDashboardDataSnapshot(dashboardDataSnapshot(profile));
+}
+
 function saveDashboardData(profile: DashboardProfile, data: DashboardData) {
   try {
     window.sessionStorage.setItem(dashboardDataKey(profile), JSON.stringify(data));
+    window.dispatchEvent(new Event(DASHBOARD_DATA_EVENT));
   } catch {
     // A full dashboard can exceed restrictive browser storage quotas; live data still works.
   }
+}
+
+function ownershipLabel(ownership: DashboardOwnership | null, loading: boolean, accountId?: number) {
+  if (!accountId) return "Account identity is not precise enough to check ownership";
+  if (loading) return "Checking the owners plugin…";
+  if (!ownership) return "Expand again to retry the ownership check";
+  if (ownership.status === "unavailable") return "This Gerrit server does not expose compatible ownership data";
+  if (ownership.status === "approved") return "The owner requirement is already satisfied";
+  if (ownership.status === "owner-all") return `You own all ${ownership.pendingPaths} file${ownership.pendingPaths === 1 ? "" : "s"} awaiting owner approval`;
+  if (ownership.status === "owner-some") return `You own ${ownership.ownedPaths} of ${ownership.pendingPaths} files awaiting owner approval`;
+  const owners = ownership.eligibleOwners.slice(0, 3).join(", ");
+  return owners ? `You are not an owner for the pending files · Eligible: ${owners}` : "You are not an owner for the pending files";
 }
 
 function confidenceLabel(change: DashboardChange) {
@@ -193,17 +225,38 @@ function confidenceLabel(change: DashboardChange) {
 function ChangeRow({
   change,
   abandonSelected,
+  identityAccountId,
   onOpen,
   onToggleAbandon,
 }: {
   change: DashboardChange;
   abandonSelected: boolean;
+  identityAccountId?: number;
   onOpen(change: DashboardChange): void;
   onToggleAbandon(change: DashboardChange): void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [ownership, setOwnership] = useState<DashboardOwnership | null>(null);
+  const [ownershipLoading, setOwnershipLoading] = useState(false);
   const changeAge = relativeAge(change.updated);
   const scope = change.scopes.includes("mine") ? "Mine" : "Reviewing";
+  const needsOwnerApproval = change.requirements.some((requirement) => requirement.status === "UNSATISFIED" && /owner/i.test(requirement.name));
+
+  function toggleDetails() {
+    const nextExpanded = !expanded;
+    setExpanded(nextExpanded);
+    if (!nextExpanded || !needsOwnerApproval || !identityAccountId || ownership || ownershipLoading) return;
+    setOwnershipLoading(true);
+    fetch(`/api/dashboard/ownership?server=${encodeURIComponent(change.sourceUrl)}&change=${change.changeNumber}&account=${identityAccountId}`)
+      .then(async (response) => {
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error ?? "Ownership could not be checked.");
+        return body as DashboardOwnership;
+      })
+      .then(setOwnership)
+      .catch(() => setOwnership({ status: "unavailable", ownedPaths: 0, pendingPaths: 0, eligibleOwners: [] }))
+      .finally(() => setOwnershipLoading(false));
+  }
 
   return (
     <article className={`dashboard-change dashboard-change-${change.group} evidence-${change.evidence}${change.status === "WIP" ? " is-wip" : ""}`}>
@@ -218,7 +271,7 @@ function ChangeRow({
         </span>
         <time className={changeAge.days >= 7 ? "overdue" : changeAge.days >= 3 ? "stale" : ""} dateTime={change.updated} title={`Last updated ${new Date(changeAge.timestamp).toLocaleString()}`}>Updated {changeAge.label}</time>
       </button>
-      <button className="dashboard-change-expand" type="button" aria-expanded={expanded} aria-label={expanded ? "Collapse change details" : "Expand change details"} onClick={() => setExpanded((current) => !current)}>
+      <button className="dashboard-change-expand" type="button" aria-expanded={expanded} aria-label={expanded ? "Collapse change details" : "Expand change details"} onClick={toggleDetails}>
         {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
       </button>
       {expanded && (
@@ -226,6 +279,7 @@ function ChangeRow({
           <div><span>Owner</span><strong>{change.owner.name}</strong></div>
           <div><span>Branch</span><strong>{change.branch}</strong></div>
           <div><span>Why this status?</span><strong>{confidenceLabel(change)}</strong></div>
+          {needsOwnerApproval && <div className="dashboard-ownership"><span>Owner requirement</span><strong>{ownershipLabel(ownership, ownershipLoading, identityAccountId)}</strong></div>}
           <div><span>Topic</span><strong>{change.topic ?? "No topic"}</strong></div>
           <div><span>Updated</span><strong>{new Date(parseTime(change.updated)).toLocaleString()}</strong></div>
           <div className="dashboard-change-detail-actions">
@@ -262,6 +316,7 @@ function Group({
   changes,
   warning,
   abandonQueue,
+  identityAccountId,
   onOpen,
   onToggleAbandon,
 }: {
@@ -269,6 +324,7 @@ function Group({
   changes: DashboardChange[];
   warning?: string;
   abandonQueue: Record<string, string>;
+  identityAccountId?: number;
   onOpen(change: DashboardChange): void;
   onToggleAbandon(change: DashboardChange): void;
 }) {
@@ -280,7 +336,7 @@ function Group({
       </div>
       <div className="dashboard-group-list">
         {changes.length > 0 ? changes.map((change) => (
-          <ChangeRow key={change.id} change={change} abandonSelected={Object.hasOwn(abandonQueue, change.id)} onOpen={onOpen} onToggleAbandon={onToggleAbandon} />
+          <ChangeRow key={change.id} change={change} abandonSelected={Object.hasOwn(abandonQueue, change.id)} identityAccountId={identityAccountId} onOpen={onOpen} onToggleAbandon={onToggleAbandon} />
         )) : (
           <div className="dashboard-group-empty">No changes in this group.</div>
         )}
@@ -293,10 +349,14 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  const initialViewState = useMemo(() => readUrlViewState(searchParams, readViewState(profile)), [profile, searchParams]);
-  const initialDashboardData = useMemo(() => readDashboardData(profile), [profile]);
-  const dataRef = useRef<DashboardData | null>(initialDashboardData);
-  const [data, setData] = useState<DashboardData | null>(initialDashboardData);
+  const initialViewState = useMemo(() => readUrlViewState(searchParams, DEFAULT_VIEW_STATE), [searchParams]);
+  const initialScrollY = useMemo(() => readViewState(profile).scrollY, [profile]);
+  const hydrated = useSyncExternalStore(subscribeHydration, () => true, () => false);
+  const cachedSnapshot = useSyncExternalStore(subscribeDashboardData, () => dashboardDataSnapshot(profile), () => "");
+  const cachedData = useMemo(() => parseDashboardDataSnapshot(cachedSnapshot), [cachedSnapshot]);
+  const dataRef = useRef<DashboardData | null>(null);
+  const [liveData, setLiveData] = useState<DashboardData | null>(null);
+  const data = liveData ?? cachedData;
   const [error, setError] = useState("");
   const [refreshError, setRefreshError] = useState("");
   const [isRefreshing, setIsRefreshing] = useState(true);
@@ -323,15 +383,15 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
   }, [activityAgeFilter, data?.identity.accountId, pathname, profile, project, router, scope, searchParams, sort, topic, wipFilter, workState]);
 
   useEffect(() => {
-    if (!data || initialViewState.scrollY <= 0) return;
-    const frame = requestAnimationFrame(() => window.scrollTo({ top: initialViewState.scrollY }));
+    if (!data || initialScrollY <= 0) return;
+    const frame = requestAnimationFrame(() => window.scrollTo({ top: initialScrollY }));
     return () => cancelAnimationFrame(frame);
-  }, [data, initialViewState.scrollY]);
+  }, [data, initialScrollY]);
 
   useEffect(() => {
     const controller = new AbortController();
     const identityQuery = profile.accountId === undefined ? "" : `&account=${profile.accountId}`;
-    fetch(`/api/dashboard?server=${encodeURIComponent(profile.server)}&username=${encodeURIComponent(profile.username)}${identityQuery}`, { signal: controller.signal })
+    fetch(`/api/dashboard?v=3&server=${encodeURIComponent(profile.server)}&username=${encodeURIComponent(profile.username)}${identityQuery}`, { signal: controller.signal })
       .then(async (response) => {
         const body = await response.json();
         if (!response.ok) throw new Error(body.error ?? "The dashboard could not be loaded.");
@@ -339,7 +399,7 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
       })
       .then((nextData) => {
         dataRef.current = nextData;
-        setData(nextData);
+        setLiveData(nextData);
         saveDashboardData(profile, nextData);
         setError("");
         setRefreshError("");
@@ -347,7 +407,7 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
       })
       .catch((reason) => {
         if (reason.name === "AbortError") return;
-        if (dataRef.current) setRefreshError(reason.message);
+        if (dataRef.current || readDashboardData(profile)) setRefreshError(reason.message);
         else setError(reason.message);
         setIsRefreshing(false);
       });
@@ -492,8 +552,8 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
           <div className="dashboard-heading-actions">
             <button type="button" onClick={() => copyDashboardLink("exact")}><Share2 size={13} /> {shareCopied === "exact" ? "Copied exact view" : "Share exact view"}</button>
             <button type="button" onClick={() => copyDashboardLink("filters")}><Share2 size={13} /> {shareCopied === "filters" ? "Copied filter view" : "Share filters"}</button>
-            <button type="button" className="dashboard-refresh" onClick={reload} disabled={isRefreshing}>
-              <RefreshCw size={13} className={isRefreshing ? "spinner" : ""} />
+            <button type="button" className="dashboard-refresh" onClick={reload} disabled={hydrated && isRefreshing}>
+              <RefreshCw size={13} className={hydrated && isRefreshing ? "spinner" : ""} />
               {data ? `Refreshed ${relativeAge(data.fetchedAt).label} ago` : "Refresh"}
             </button>
           </div>
@@ -595,6 +655,7 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
                 changes={grouped[group.id]}
                 warning={group.id === "unclear" ? queryWarning?.message : undefined}
                 abandonQueue={abandonQueue}
+                identityAccountId={data?.identity.accountId ?? profile.accountId}
                 onOpen={openChange}
                 onToggleAbandon={toggleAbandon}
               />

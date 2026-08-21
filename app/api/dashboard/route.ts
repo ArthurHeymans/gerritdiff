@@ -245,6 +245,12 @@ function classifyReviewingChange(
   return { group: "unclear", evidence: "inferred", diagnosis: "Likely needs triage; attention data is unavailable" };
 }
 
+function requirementFact(name: string) {
+  if (/owners?|code[- ]review from owners/i.test(name)) return "Needs owner approval";
+  if (/^code[- ]review$/i.test(name)) return "Needs Code-Review +2";
+  return `Needs ${name}`;
+}
+
 function classify({
   server,
   change,
@@ -264,11 +270,14 @@ function classify({
   const unresolved = change.unresolved_comment_count;
   const unsatisfied = change.submit_requirements?.filter((requirement) => requirement.status === "UNSATISFIED") ?? [];
   const conflict = change.mergeable === false;
-  const facts = [ci.fact].filter((fact): fact is string => Boolean(fact));
+  const facts: string[] = [];
+  if (conflict) facts.push("Merge conflict");
+  if (negative) facts.push(`${negative[0]} blocked`);
+  if (ci.fact) facts.push(ci.fact);
+  facts.push(...unsatisfied
+    .map((requirement) => requirementFact(requirement.name))
+    .filter((fact) => !(negative && fact === "Needs Code-Review +2")));
   if (unresolved) facts.push(`${unresolved} unresolved`);
-  if (conflict) facts.unshift("Merge conflict");
-  if (negative) facts.unshift(`${negative[0]} blocked`);
-  if (unsatisfied.length > 0 && !negative) facts.push(`${unsatisfied.length} requirement${unsatisfied.length === 1 ? "" : "s"} missing`);
   const classification = scopes.includes("mine")
     ? classifyOwnedChange({ change, ci, negative, unresolved, conflict })
     : classifyReviewingChange(change, labels, identity, attentionAvailable);
@@ -295,6 +304,7 @@ function classify({
     facts: facts.slice(0, 3),
     diagnosis: classification.diagnosis,
     ci: ci.state,
+    requirements: change.submit_requirements ?? [],
     unresolvedCount: unresolved,
     submittable: change.submittable,
   };

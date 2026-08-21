@@ -220,6 +220,6 @@ export function GerritDiffApp() {
   };
   if (url) return <ChangeLoader url={url} base={base} threadId={threadId} returnTo={returnTo} />;
   if (searchParams.get("setup") === "1") return <Landing onSaveProfile={saveAndOpenDashboard} />;
-  if (profile) return <Dashboard profile={profile} sharedIdentity={sharedIdentity} onForget={sharedIdentity ? () => router.push("/?setup=1") : () => saveDashboardProfile(null)} />;
+  if (profile) return <Dashboard key={`${profile.server}:${profile.accountId ?? profile.username}`} profile={profile} sharedIdentity={sharedIdentity} onForget={sharedIdentity ? () => router.push("/?setup=1") : () => saveDashboardProfile(null)} />;
   return <Landing onSaveProfile={saveAndOpenDashboard} />;
 }

@@ -59,6 +59,18 @@ export type DashboardGroup = "action" | "unclear" | "waiting" | "ready";
 export type DashboardEvidence = "explicit" | "derived" | "inferred" | "unknown";
 export type DashboardCiState = "failed" | "running" | "passed" | "unknown";
 
+export type DashboardRequirement = {
+  name: string;
+  status: "SATISFIED" | "UNSATISFIED" | "OVERRIDDEN" | "NOT_APPLICABLE" | "ERROR";
+};
+
+export type DashboardOwnership = {
+  status: "owner-all" | "owner-some" | "not-owner" | "approved" | "unavailable";
+  ownedPaths: number;
+  pendingPaths: number;
+  eligibleOwners: string[];
+};
+
 export type DashboardChange = {
   id: string;
   sourceUrl: string;
@@ -77,6 +89,7 @@ export type DashboardChange = {
   facts: string[];
   diagnosis: string;
   ci: DashboardCiState;
+  requirements: DashboardRequirement[];
   unresolvedCount?: number;
   submittable?: boolean;
 };

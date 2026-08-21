@@ -96,11 +96,11 @@ function ChangeRow({
   const scope = change.scopes.includes("mine") ? "Mine" : "Reviewing";
 
   return (
-    <article className={`dashboard-change dashboard-change-${change.group} evidence-${change.evidence}`}>
+    <article className={`dashboard-change dashboard-change-${change.group} evidence-${change.evidence}${change.status === "WIP" ? " is-wip" : ""}`}>
       <button className="dashboard-change-main" type="button" onClick={() => window.location.assign(`/?url=${encodeURIComponent(change.sourceUrl)}`)}>
         <span className="dashboard-change-title">
           <strong>{change.subject}</strong>
-          <small>{change.project} #{change.changeNumber}{change.patchset ? ` · PS${change.patchset}` : ""} · {scope}{change.topic ? ` · ${change.topic}` : ""}{change.scopes.includes("reviewing") ? ` · ${change.owner.name}` : ""}</small>
+          <small>{change.project} #{change.changeNumber}{change.patchset ? ` · PS${change.patchset}` : ""} · {scope}{change.status === "WIP" && <b className="dashboard-wip-badge">WIP</b>}{change.topic ? ` · ${change.topic}` : ""}{change.scopes.includes("reviewing") ? ` · ${change.owner.name}` : ""}</small>
         </span>
         <span className="dashboard-change-reason">
           <strong>{change.facts.join(" · ") || "Details pending"}</strong>
@@ -160,23 +160,19 @@ function Group({
   abandonQueue: Record<string, string>;
   onToggleAbandon(change: DashboardChange): void;
 }) {
-  const [collapsed, setCollapsed] = useState(group.id === "ready");
   return (
-    <section className={`dashboard-group dashboard-group-${group.id}${collapsed ? " is-collapsed" : ""}`}>
-      <button className="dashboard-group-head" type="button" onClick={() => setCollapsed((current) => !current)}>
-        {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+    <section className={`dashboard-group dashboard-group-${group.id}`}>
+      <div className="dashboard-group-head">
         <span>{group.label}</span><b>{changes.length}</b>
         <small className={warning ? "warning" : ""}>{warning ?? group.hint}</small>
-      </button>
-      {!collapsed && (
-        <div className="dashboard-group-list">
-          {changes.length > 0 ? changes.map((change) => (
-            <ChangeRow key={change.id} change={change} abandonSelected={Object.hasOwn(abandonQueue, change.id)} onToggleAbandon={onToggleAbandon} />
-          )) : (
-            <div className="dashboard-group-empty">No changes in this group.</div>
-          )}
-        </div>
-      )}
+      </div>
+      <div className="dashboard-group-list">
+        {changes.length > 0 ? changes.map((change) => (
+          <ChangeRow key={change.id} change={change} abandonSelected={Object.hasOwn(abandonQueue, change.id)} onToggleAbandon={onToggleAbandon} />
+        )) : (
+          <div className="dashboard-group-empty">No changes in this group.</div>
+        )}
+      </div>
     </section>
   );
 }
@@ -186,6 +182,8 @@ export function Dashboard({ profile, onForget }: { profile: DashboardProfile; on
   const [error, setError] = useState("");
   const [refresh, setRefresh] = useState(0);
   const [scope, setScope] = useState<"all" | DashboardScope>("all");
+  const [workState, setWorkState] = useState<"all" | DashboardGroup>("all");
+  const [wipFilter, setWipFilter] = useState<"all" | "wip" | "reviewable">("all");
   const [project, setProject] = useState("all");
   const [topic, setTopic] = useState("all");
   const [sort, setSort] = useState<"priority" | "freshest" | "oldest">("priority");
@@ -236,9 +234,26 @@ export function Dashboard({ profile, onForget }: { profile: DashboardProfile; on
     if (activityAgeFilter < 0) return days <= Math.abs(activityAgeFilter);
     return true;
   }), [activityAgeFilter, data, project]);
-  const topics = useMemo(() => [...new Set(projectFiltered.flatMap((change) => change.topic ? [change.topic] : []))].sort(), [projectFiltered]);
-  const filtered = useMemo(() => projectFiltered.filter((change) => topic === "all" || change.topic === topic), [projectFiltered, topic]);
-  const visible = useMemo(() => filtered.filter((change) => scope === "all" || change.scopes.includes(scope)), [filtered, scope]);
+  const topicOptionsSource = useMemo(() => projectFiltered.filter((change) => scope === "all" || change.scopes.includes(scope)), [projectFiltered, scope]);
+  const topics = useMemo(() => [...new Set(topicOptionsSource.flatMap((change) => change.topic ? [change.topic] : []))].sort(), [topicOptionsSource]);
+  const topicFiltered = useMemo(() => projectFiltered.filter((change) => topic === "all" || change.topic === topic), [projectFiltered, topic]);
+  const scopedForWipCounts = useMemo(() => topicFiltered.filter((change) => scope === "all" || change.scopes.includes(scope)), [scope, topicFiltered]);
+  const wipCounts = {
+    all: scopedForWipCounts.length,
+    wip: scopedForWipCounts.filter((change) => change.status === "WIP").length,
+    reviewable: scopedForWipCounts.filter((change) => change.status !== "WIP").length,
+  };
+  const wipFiltered = useMemo(() => topicFiltered.filter((change) => (
+    wipFilter === "all" || (wipFilter === "wip" ? change.status === "WIP" : change.status !== "WIP")
+  )), [topicFiltered, wipFilter]);
+  const counts = {
+    all: wipFiltered.length,
+    mine: wipFiltered.filter((change) => change.scopes.includes("mine")).length,
+    reviewing: wipFiltered.filter((change) => change.scopes.includes("reviewing")).length,
+  };
+  const scoped = useMemo(() => wipFiltered.filter((change) => scope === "all" || change.scopes.includes(scope)), [scope, wipFiltered]);
+  const stateCounts = Object.fromEntries(GROUPS.map(({ id }) => [id, scoped.filter((change) => change.group === id).length])) as Record<DashboardGroup, number>;
+  const visible = useMemo(() => scoped.filter((change) => workState === "all" || change.group === workState), [scoped, workState]);
   const grouped = useMemo(() => Object.fromEntries(GROUPS.map(({ id }) => [
     id,
     visible.filter((change) => change.group === id).sort((left, right) => {
@@ -249,11 +264,6 @@ export function Dashboard({ profile, onForget }: { profile: DashboardProfile; on
     }),
   ])) as Record<DashboardGroup, DashboardChange[]>, [sort, visible]);
   const queryWarning = data?.warnings.find((warning) => warning.source === "attention" || warning.source === "reviewing");
-  const counts = {
-    all: filtered.length,
-    mine: filtered.filter((change) => change.scopes.includes("mine")).length,
-    reviewing: filtered.filter((change) => change.scopes.includes("reviewing")).length,
-  };
   const abandonChanges = (data?.changes ?? []).filter((change) => Object.hasOwn(abandonQueue, change.id));
   const generatedAbandonCommand = abandonmentCommand(abandonChanges, abandonQueue, profile.username, sshHost, sshPort);
 
@@ -277,9 +287,38 @@ export function Dashboard({ profile, onForget }: { profile: DashboardProfile; on
           <ThemeButton />
         </div>
       </header>
-      <div className="dashboard-shell">
+      <div className="dashboard-workspace">
+        <aside className="dashboard-sidebar">
+          <section>
+            <h2>Scope</h2>
+            {(["all", "mine", "reviewing"] as const).map((value) => (
+              <button key={value} type="button" className={scope === value ? "active" : ""} onClick={() => { setScope(value); setTopic("all"); }}>
+                <span>{value === "all" ? "All work" : value === "mine" ? "Mine" : "Reviewing"}</span><b>{counts[value]}</b>
+              </button>
+            ))}
+          </section>
+          <section>
+            <h2>Work state</h2>
+            <button type="button" className={workState === "all" ? "active" : ""} onClick={() => setWorkState("all")}><span>All states</span><b>{scoped.length}</b></button>
+            {GROUPS.map((group) => (
+              <button key={group.id} type="button" className={workState === group.id ? "active" : ""} onClick={() => setWorkState(group.id)}>
+                <span>{group.label.replace(" · you decide", "")}</span><b>{stateCounts[group.id]}</b>
+              </button>
+            ))}
+          </section>
+          <section>
+            <h2>Review state</h2>
+            {(["all", "wip", "reviewable"] as const).map((value) => (
+              <button key={value} type="button" className={wipFilter === value ? "active" : ""} onClick={() => setWipFilter(value)}>
+                <span>{value === "all" ? "All changes" : value === "wip" ? "Work in progress" : "Ready for review"}</span><b>{wipCounts[value]}</b>
+              </button>
+            ))}
+          </section>
+          {abandonChanges.length > 0 && <div className="dashboard-sidebar-queue"><span>Flagged for abandonment</span><b>{abandonChanges.length}</b></div>}
+        </aside>
+        <div className="dashboard-shell">
         <div className="dashboard-heading">
-          <div><h1>My work</h1><p>{grouped.action.length} need action · {grouped.unclear.length} need triage · public changes only</p></div>
+          <div><h1>My work</h1><p>{stateCounts.action} need action · {stateCounts.unclear} need triage · public changes only</p></div>
           <button type="button" className="dashboard-refresh" onClick={reload} disabled={!data && !error}>
             <RefreshCw size={13} className={!data && !error ? "spinner" : ""} />
             {data ? `Refreshed ${relativeAge(data.fetchedAt).label} ago` : "Refresh"}
@@ -287,13 +326,6 @@ export function Dashboard({ profile, onForget }: { profile: DashboardProfile; on
         </div>
 
         <div className="dashboard-controls">
-          <div className="dashboard-scope" aria-label="Change scope">
-            {(["all", "mine", "reviewing"] as const).map((value) => (
-              <button key={value} type="button" className={scope === value ? "active" : ""} onClick={() => setScope(value)}>
-                {value === "all" ? "All" : value === "mine" ? "Mine" : "Reviewing"} <b>{counts[value]}</b>
-              </button>
-            ))}
-          </div>
           <select aria-label="Filter by project" value={project} onChange={(event) => { setProject(event.target.value); setTopic("all"); }}>
             <option value="all">All projects</option>
             {projects.map((value) => <option key={value} value={value}>{value}</option>)}
@@ -381,7 +413,7 @@ export function Dashboard({ profile, onForget }: { profile: DashboardProfile; on
           <div className="dashboard-empty is-uncertain"><strong>No verified results</strong><span>One or more queries failed, so this is not an all-clear state.</span></div>
         ) : (
           <div className="dashboard-groups">
-            {GROUPS.map((group) => (
+            {GROUPS.filter((group) => grouped[group.id].length > 0 || workState === group.id).map((group) => (
               <Group
                 key={group.id}
                 group={group}
@@ -393,6 +425,7 @@ export function Dashboard({ profile, onForget }: { profile: DashboardProfile; on
             ))}
           </div>
         )}
+        </div>
       </div>
     </main>
   );

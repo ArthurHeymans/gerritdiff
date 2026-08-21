@@ -48,6 +48,12 @@ export type GerritReviewer = {
   verified?: number;
 };
 
+export type ChangeCheck = {
+  name: string;
+  result: "SUCCESS" | "FAILURE" | "UNSTABLE" | "ABORTED" | "NOT_BUILT";
+  url: string;
+};
+
 export type DashboardProfile = {
   server: string;
   username: string;
@@ -132,6 +138,7 @@ export type ChangeData = {
   status: string;
   owner: { name: string; email?: string; avatarUrl?: string };
   reviewers: GerritReviewer[];
+  checks: ChangeCheck[];
   revision: string;
   revisionNumber: number;
   revisions: { revision: string; number: number; created?: string; uploader?: string }[];

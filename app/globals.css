@@ -174,6 +174,9 @@ a { color: inherit; text-decoration: none; }
 .reviewer-vote.negative { border-color: color-mix(in srgb, var(--red) 35%, var(--border)); color: var(--red); background: var(--red-bg); }
 .reviewer-vote.verified { margin-left: -2px; }
 .reviewers-empty { color: var(--faint); font-style: italic; }
+.automation-results { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.automation-results-label { color: var(--faint); font-size: 8px; font-weight: 800; text-transform: uppercase; letter-spacing: .055em; }
+.automation-check { height: 25px; display: inline-flex; align-items: center; gap: 4px; padding: 0 7px; border: 1px solid var(--border); border-radius: 6px; color: var(--muted); background: var(--panel-2); font-size: 9px; }.automation-check:hover { color: var(--text); background: var(--panel-3); }.automation-check strong { color: var(--text); }.automation-check span { font: 700 7px "DM Mono", monospace; }.automation-check.success { border-color: color-mix(in srgb, var(--green) 35%, var(--border)); color: var(--green); background: var(--green-bg); }.automation-check.failure, .automation-check.aborted { border-color: color-mix(in srgb, var(--red) 35%, var(--border)); color: var(--red); background: var(--red-bg); }.automation-check.unstable, .automation-check.not_built { color: var(--thread-unresolved-fg); }
 .separator { color: var(--faint); margin: 0 3px; }
 .diff-toolbar { height: 48px; display: flex; align-items: center; gap: 9px; padding: 0 clamp(22px, 4vw, 64px); position: sticky; top: 60px; z-index: 10; background: color-mix(in srgb, var(--bg) 93%, transparent); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); color: var(--muted); font-size: 10px; }
 .diff-toolbar strong { color: var(--text); }

@@ -144,7 +144,7 @@ function displayServer(server: string) {
 }
 
 function viewStateKey(profile: DashboardProfile) {
-  return `gerritdiff:dashboard-view:${profile.server}:${profile.accountId ?? profile.username}`;
+  return `gerritdiff:dashboard-view:${profile.server}:${profile.username}`;
 }
 
 function readViewState(profile: DashboardProfile): DashboardViewState {
@@ -157,13 +157,14 @@ function readViewState(profile: DashboardProfile): DashboardViewState {
 }
 
 function saveViewState(profile: DashboardProfile, state: DashboardViewState) {
-  window.sessionStorage.setItem(viewStateKey(profile), JSON.stringify(state));
+  window.sessionStorage.setItem(viewStateKey(profile), JSON.stringify({ scrollY: state.scrollY }));
 }
 
+const DASHBOARD_CACHE_VERSION = 3;
 const DASHBOARD_DATA_EVENT = "gerritdiff:dashboard-data-change";
 
 function dashboardDataKey(profile: DashboardProfile) {
-  return `gerritdiff:dashboard-data:v3:${profile.server}:${profile.accountId ?? profile.username}`;
+  return `gerritdiff:dashboard-data:v${DASHBOARD_CACHE_VERSION}:${profile.server}:${profile.username}`;
 }
 
 function subscribeDashboardData(listener: () => void) {
@@ -203,10 +204,11 @@ function saveDashboardData(profile: DashboardProfile, data: DashboardData) {
   }
 }
 
-function ownershipLabel(ownership: DashboardOwnership | null, loading: boolean, accountId?: number) {
+function ownershipLabel(ownership: DashboardOwnership | null, loading: boolean, error: string, accountId?: number) {
   if (!accountId) return "Account identity is not precise enough to check ownership";
   if (loading) return "Checking the owners plugin…";
-  if (!ownership) return "Expand again to retry the ownership check";
+  if (error) return error;
+  if (!ownership) return "Ownership has not been checked for the current dashboard data";
   if (ownership.status === "unavailable") return "This Gerrit server does not expose compatible ownership data";
   if (ownership.status === "approved") return "The owner requirement is already satisfied";
   if (ownership.status === "owner-all") return `You own all ${ownership.pendingPaths} file${ownership.pendingPaths === 1 ? "" : "s"} awaiting owner approval`;
@@ -226,36 +228,53 @@ function ChangeRow({
   change,
   abandonSelected,
   identityAccountId,
+  ownershipRevision,
   onOpen,
   onToggleAbandon,
 }: {
   change: DashboardChange;
   abandonSelected: boolean;
   identityAccountId?: number;
+  ownershipRevision: string;
   onOpen(change: DashboardChange): void;
   onToggleAbandon(change: DashboardChange): void;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const [ownership, setOwnership] = useState<DashboardOwnership | null>(null);
-  const [ownershipLoading, setOwnershipLoading] = useState(false);
+  const [ownershipState, setOwnershipState] = useState<{ revision: string; value: DashboardOwnership | null; error: string }>({ revision: "", value: null, error: "" });
+  const [ownershipLoadingRevision, setOwnershipLoadingRevision] = useState<string | null>(null);
+  const ownershipController = useRef<AbortController | null>(null);
+  const ownership = ownershipState.revision === ownershipRevision ? ownershipState.value : null;
+  const ownershipError = ownershipState.revision === ownershipRevision ? ownershipState.error : "";
+  const ownershipLoading = ownershipLoadingRevision === ownershipRevision;
   const changeAge = relativeAge(change.updated);
   const scope = change.scopes.includes("mine") ? "Mine" : "Reviewing";
   const needsOwnerApproval = change.requirements.some((requirement) => requirement.status === "UNSATISFIED" && /owner/i.test(requirement.name));
 
+  useEffect(() => () => ownershipController.current?.abort(), []);
+
+  async function loadOwnership() {
+    if (!needsOwnerApproval || !identityAccountId || ownershipLoading) return;
+    ownershipController.current?.abort();
+    const controller = new AbortController();
+    ownershipController.current = controller;
+    setOwnershipLoadingRevision(ownershipRevision);
+    setOwnershipState({ revision: ownershipRevision, value: null, error: "" });
+    try {
+      const response = await fetch(`/api/dashboard/ownership?server=${encodeURIComponent(change.sourceUrl)}&change=${change.changeNumber}&account=${identityAccountId}`, { signal: controller.signal });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error ?? "Ownership could not be checked.");
+      if (!controller.signal.aborted) setOwnershipState({ revision: ownershipRevision, value: body as DashboardOwnership, error: "" });
+    } catch (reason) {
+      if (!controller.signal.aborted) setOwnershipState({ revision: ownershipRevision, value: null, error: reason instanceof Error ? reason.message : "Ownership could not be checked." });
+    } finally {
+      if (!controller.signal.aborted) setOwnershipLoadingRevision(null);
+    }
+  }
+
   function toggleDetails() {
     const nextExpanded = !expanded;
     setExpanded(nextExpanded);
-    if (!nextExpanded || !needsOwnerApproval || !identityAccountId || ownership || ownershipLoading) return;
-    setOwnershipLoading(true);
-    fetch(`/api/dashboard/ownership?server=${encodeURIComponent(change.sourceUrl)}&change=${change.changeNumber}&account=${identityAccountId}`)
-      .then(async (response) => {
-        const body = await response.json();
-        if (!response.ok) throw new Error(body.error ?? "Ownership could not be checked.");
-        return body as DashboardOwnership;
-      })
-      .then(setOwnership)
-      .catch(() => setOwnership({ status: "unavailable", ownedPaths: 0, pendingPaths: 0, eligibleOwners: [] }))
-      .finally(() => setOwnershipLoading(false));
+    if (nextExpanded && (!ownership || ownership.status === "unavailable")) loadOwnership();
   }
 
   return (
@@ -279,10 +298,11 @@ function ChangeRow({
           <div><span>Owner</span><strong>{change.owner.name}</strong></div>
           <div><span>Branch</span><strong>{change.branch}</strong></div>
           <div><span>Why this status?</span><strong>{confidenceLabel(change)}</strong></div>
-          {needsOwnerApproval && <div className="dashboard-ownership"><span>Owner requirement</span><strong>{ownershipLabel(ownership, ownershipLoading, identityAccountId)}</strong></div>}
+          {needsOwnerApproval && <div className="dashboard-ownership"><span>Owner requirement</span><strong>{ownershipLabel(ownership, ownershipLoading, ownershipError, identityAccountId)}</strong></div>}
           <div><span>Topic</span><strong>{change.topic ?? "No topic"}</strong></div>
           <div><span>Updated</span><strong>{new Date(parseTime(change.updated)).toLocaleString()}</strong></div>
           <div className="dashboard-change-detail-actions">
+            {needsOwnerApproval && identityAccountId && !ownershipLoading && (ownershipError || !ownership || ownership.status === "unavailable") && <button type="button" onClick={loadOwnership}>Retry ownership check</button>}
             <button type="button" onClick={() => onOpen(change)}>Open diff</button>
             <a href={change.sourceUrl} target="_blank" rel="noreferrer">Open in Gerrit <ExternalLink size={12} /></a>
             {change.scopes.includes("mine") && change.patchset && (
@@ -306,7 +326,7 @@ function abandonmentCommand(changes: DashboardChange[], messages: Record<string,
   return changes.flatMap((change) => {
     if (!change.patchset) return [];
     const message = messages[change.id]?.trim();
-    const messageArgument = message ? ` -m ${shellArg(JSON.stringify(message))}` : "";
+    const messageArgument = message ? ` -m ${shellArg(message)}` : "";
     return [`ssh -p ${port} ${target} gerrit review --abandon${messageArgument} ${change.changeNumber},${change.patchset}`];
   }).join(" && \\\n  ");
 }
@@ -317,6 +337,7 @@ function Group({
   warning,
   abandonQueue,
   identityAccountId,
+  ownershipRevision,
   onOpen,
   onToggleAbandon,
 }: {
@@ -325,6 +346,7 @@ function Group({
   warning?: string;
   abandonQueue: Record<string, string>;
   identityAccountId?: number;
+  ownershipRevision: string;
   onOpen(change: DashboardChange): void;
   onToggleAbandon(change: DashboardChange): void;
 }) {
@@ -336,7 +358,7 @@ function Group({
       </div>
       <div className="dashboard-group-list">
         {changes.length > 0 ? changes.map((change) => (
-          <ChangeRow key={change.id} change={change} abandonSelected={Object.hasOwn(abandonQueue, change.id)} identityAccountId={identityAccountId} onOpen={onOpen} onToggleAbandon={onToggleAbandon} />
+          <ChangeRow key={change.id} change={change} abandonSelected={Object.hasOwn(abandonQueue, change.id)} identityAccountId={identityAccountId} ownershipRevision={ownershipRevision} onOpen={onOpen} onToggleAbandon={onToggleAbandon} />
         )) : (
           <div className="dashboard-group-empty">No changes in this group.</div>
         )}
@@ -349,6 +371,7 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
+  const { server: profileServer, username: profileUsername, accountId: profileAccountId } = profile;
   const initialViewState = useMemo(() => readUrlViewState(searchParams, DEFAULT_VIEW_STATE), [searchParams]);
   const initialScrollY = useMemo(() => readViewState(profile).scrollY, [profile]);
   const hydrated = useSyncExternalStore(subscribeHydration, () => true, () => false);
@@ -377,10 +400,10 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
   useEffect(() => {
     const state = { scope, workState, wipFilter, project, topic, sort, activityAgeFilter, scrollY: window.scrollY };
     saveViewState(profile, state);
-    const canonical = dashboardSearchParams(profile, state, data?.identity.accountId ?? profile.accountId);
+    const canonical = dashboardSearchParams(profile, state, profile.accountId);
     const target = `/dashboard?${canonical}`;
     if (pathname !== "/dashboard" || searchParams.toString() !== canonical.toString()) router.replace(target, { scroll: false });
-  }, [activityAgeFilter, data?.identity.accountId, pathname, profile, project, router, scope, searchParams, sort, topic, wipFilter, workState]);
+  }, [activityAgeFilter, pathname, profile, project, router, scope, searchParams, sort, topic, wipFilter, workState]);
 
   useEffect(() => {
     if (!data || initialScrollY <= 0) return;
@@ -390,8 +413,10 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
 
   useEffect(() => {
     const controller = new AbortController();
-    const identityQuery = profile.accountId === undefined ? "" : `&account=${profile.accountId}`;
-    fetch(`/api/dashboard?v=3&server=${encodeURIComponent(profile.server)}&username=${encodeURIComponent(profile.username)}${identityQuery}`, { signal: controller.signal })
+    const requestProfile = { server: profileServer, username: profileUsername, accountId: profileAccountId };
+    const identityQuery = profileAccountId === undefined ? "" : `&account=${profileAccountId}`;
+    // Keep this request version paired with DASHBOARD_CACHE_VERSION so API shape changes also invalidate session data.
+    fetch(`/api/dashboard?v=${DASHBOARD_CACHE_VERSION}&server=${encodeURIComponent(profileServer)}&username=${encodeURIComponent(profileUsername)}${identityQuery}`, { signal: controller.signal })
       .then(async (response) => {
         const body = await response.json();
         if (!response.ok) throw new Error(body.error ?? "The dashboard could not be loaded.");
@@ -400,19 +425,19 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
       .then((nextData) => {
         dataRef.current = nextData;
         setLiveData(nextData);
-        saveDashboardData(profile, nextData);
+        saveDashboardData(requestProfile, nextData);
         setError("");
         setRefreshError("");
         setIsRefreshing(false);
       })
       .catch((reason) => {
         if (reason.name === "AbortError") return;
-        if (dataRef.current || readDashboardData(profile)) setRefreshError(reason.message);
+        if (dataRef.current || readDashboardData(requestProfile)) setRefreshError(reason.message);
         else setError(reason.message);
         setIsRefreshing(false);
       });
     return () => controller.abort();
-  }, [profile, refresh]);
+  }, [profileAccountId, profileServer, profileUsername, refresh]);
 
   function currentViewState(): DashboardViewState {
     return { scope, workState, wipFilter, project, topic, sort, activityAgeFilter, scrollY: window.scrollY };
@@ -656,6 +681,7 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
                 warning={group.id === "unclear" ? queryWarning?.message : undefined}
                 abandonQueue={abandonQueue}
                 identityAccountId={data?.identity.accountId ?? profile.accountId}
+                ownershipRevision={data?.fetchedAt ?? ""}
                 onOpen={openChange}
                 onToggleAbandon={toggleAbandon}
               />

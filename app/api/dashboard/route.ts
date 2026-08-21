@@ -268,16 +268,29 @@ function classify({
   const ci = ciState(labels);
   const negative = blockingReview(labels);
   const unresolved = change.unresolved_comment_count;
-  const unsatisfied = change.submit_requirements?.filter((requirement) => requirement.status === "UNSATISFIED") ?? [];
+  const requirements = change.submit_requirements ?? [];
+  const codeReviewBlocked = Boolean(negative && /^code[- ]review$/i.test(negative[0]));
+  const requirementFacts = requirements.flatMap((requirement) => {
+    if (requirement.status === "ERROR") return [`${requirement.name} requirement error`];
+    if (requirement.status !== "UNSATISFIED") return [];
+    const fact = requirementFact(requirement.name);
+    return codeReviewBlocked && fact === "Needs Code-Review +2" ? [] : [fact];
+  }).sort((left, right) => {
+    const priority = (fact: string) => {
+      if (fact === "Needs owner approval") return 0;
+      if (fact.endsWith(" requirement error")) return 1;
+      return 2;
+    };
+    return priority(left) - priority(right);
+  });
   const conflict = change.mergeable === false;
-  const facts: string[] = [];
-  if (conflict) facts.push("Merge conflict");
-  if (negative) facts.push(`${negative[0]} blocked`);
-  if (ci.fact) facts.push(ci.fact);
-  facts.push(...unsatisfied
-    .map((requirement) => requirementFact(requirement.name))
-    .filter((fact) => !(negative && fact === "Needs Code-Review +2")));
-  if (unresolved) facts.push(`${unresolved} unresolved`);
+  const facts = [...new Set([
+    ...requirementFacts,
+    ...(conflict ? ["Merge conflict"] : []),
+    ...(negative ? [`${negative[0]} blocked`] : []),
+    ...(ci.fact ? [ci.fact] : []),
+    ...(unresolved ? [`${unresolved} unresolved`] : []),
+  ])];
   const classification = scopes.includes("mine")
     ? classifyOwnedChange({ change, ci, negative, unresolved, conflict })
     : classifyReviewingChange(change, labels, identity, attentionAvailable);
@@ -304,7 +317,7 @@ function classify({
     facts: facts.slice(0, 3),
     diagnosis: classification.diagnosis,
     ci: ci.state,
-    requirements: change.submit_requirements ?? [],
+    requirements,
     unresolvedCount: unresolved,
     submittable: change.submittable,
   };

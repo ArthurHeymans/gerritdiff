@@ -8,6 +8,13 @@ type OwnersResponse = {
   files?: Record<string, Owner[]>;
 };
 
+function errorStatus(reason: unknown) {
+  const message = reason instanceof Error ? reason.message : "Ownership could not be checked.";
+  if (/valid Gerrit server URL|HTTP or HTTPS|credentials|Local Gerrit hosts|Private network addresses/i.test(message)) return 400;
+  if (/returned 504/i.test(message)) return 504;
+  return 502;
+}
+
 export async function GET(request: NextRequest) {
   const serverInput = request.nextUrl.searchParams.get("server")?.trim();
   const changeInput = request.nextUrl.searchParams.get("change")?.trim();
@@ -21,8 +28,12 @@ export async function GET(request: NextRequest) {
     const url = new URL(`changes/${changeInput}/revisions/current/owners~files-owners`, server);
     const response = await publicFetch(url.toString(), "application/json", true);
     if (!response) {
+      const changeResponse = await publicFetch(new URL(`changes/${changeInput}`, server).toString(), "application/json", true);
+      if (!changeResponse) {
+        return NextResponse.json({ error: `Change ${changeInput} was not found on this Gerrit server.` }, { status: 404, headers: { "Cache-Control": "no-store" } });
+      }
       const unavailable: DashboardOwnership = { status: "unavailable", ownedPaths: 0, pendingPaths: 0, eligibleOwners: [] };
-      return NextResponse.json(unavailable, { headers: { "Cache-Control": "public, s-maxage=300" } });
+      return NextResponse.json(unavailable, { headers: { "Cache-Control": "no-store" } });
     }
 
     const input = parseGerritJson<OwnersResponse>(await response.text());
@@ -44,6 +55,9 @@ export async function GET(request: NextRequest) {
     };
     return NextResponse.json(result, { headers: { "Cache-Control": "public, s-maxage=60, stale-while-revalidate=300" } });
   } catch (reason) {
-    return NextResponse.json({ error: reason instanceof Error ? reason.message : "Ownership could not be checked." }, { status: 400 });
+    return NextResponse.json(
+      { error: reason instanceof Error ? reason.message : "Ownership could not be checked." },
+      { status: errorStatus(reason), headers: { "Cache-Control": "no-store" } },
+    );
   }
 }

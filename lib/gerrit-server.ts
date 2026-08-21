@@ -29,6 +29,7 @@ type GerritDetail = {
   owner: GerritAccount;
   reviewers?: Record<string, GerritAccount[]>;
   labels?: Record<string, { all?: GerritAccount[] }>;
+  messages?: Array<{ message: string; _revision_number?: number }>;
   current_revision: string;
   revisions: Record<string, {
     _number: number;
@@ -126,7 +127,7 @@ export async function publicFetch(url: string, accept = "application/json", allo
 
 export async function resolveChange(sourceUrl: string) {
   const parsed = parseGerritUrl(sourceUrl);
-  const detailUrl = `${parsed.origin}/changes/${encodeURIComponent(parsed.change)}/detail?o=ALL_REVISIONS&o=ALL_COMMITS&o=DETAILED_LABELS`;
+  const detailUrl = `${parsed.origin}/changes/${encodeURIComponent(parsed.change)}/detail?o=ALL_REVISIONS&o=ALL_COMMITS&o=DETAILED_LABELS&o=MESSAGES`;
   const detailResponse = await publicFetch(detailUrl);
   if (!detailResponse) throw new Error("Change not found.");
   const detail = parseGerritJson<GerritDetail>(await detailResponse.text());

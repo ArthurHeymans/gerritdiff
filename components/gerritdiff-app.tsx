@@ -88,7 +88,12 @@ function Landing({ onSaveProfile }: { onSaveProfile(profile: DashboardProfile): 
 }
 
 function patchsetUrl(sourceUrl: string, changeNumber: number, patchset: number) {
-  const url = new URL(sourceUrl);
+  let url: URL;
+  try {
+    url = new URL(sourceUrl);
+  } catch {
+    return sourceUrl;
+  }
   const modern = url.pathname.match(/(\/\+\/(\d+))(?:\/\d+)?(?:\/.*)?$/);
   if (modern && Number(modern[2]) === changeNumber) {
     url.pathname = url.pathname.replace(/(\/\+\/\d+)(?:\/\d+)?(?:\/.*)?$/, `$1/${patchset}`);
@@ -220,6 +225,6 @@ export function GerritDiffApp() {
   };
   if (url) return <ChangeLoader url={url} base={base} threadId={threadId} returnTo={returnTo} />;
   if (searchParams.get("setup") === "1") return <Landing onSaveProfile={saveAndOpenDashboard} />;
-  if (profile) return <Dashboard key={`${profile.server}:${profile.accountId ?? profile.username}`} profile={profile} sharedIdentity={sharedIdentity} onForget={sharedIdentity ? () => router.push("/?setup=1") : () => saveDashboardProfile(null)} />;
+  if (profile) return <Dashboard key={`${profile.server}:${profile.username}`} profile={profile} sharedIdentity={sharedIdentity} onForget={sharedIdentity ? () => router.push("/?setup=1") : () => saveDashboardProfile(null)} />;
   return <Landing onSaveProfile={saveAndOpenDashboard} />;
 }

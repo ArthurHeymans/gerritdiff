@@ -17,7 +17,7 @@ import {
 import { CodeView, type CodeViewHandle, WorkerPoolContextProvider } from "@pierre/diffs/react";
 import type { GitStatus, GitStatusEntry } from "@pierre/trees";
 import { FileTree, useFileTree } from "@pierre/trees/react";
-import { Check, ChevronDown, ChevronUp, CircleCheck, Columns2, Copy, FileText, GitBranch, LoaderCircle, MessageSquare, PanelLeftClose, PanelLeftOpen, Pencil, Pilcrow, Quote, Reply, Rows3, Search, Send, Settings2, Terminal, Trash2, X } from "lucide-react";
+import { Check, ChevronDown, ChevronUp, CircleCheck, Columns2, Copy, ExternalLink, FileText, GitBranch, LoaderCircle, MessageSquare, PanelLeftClose, PanelLeftOpen, Pencil, Pilcrow, Quote, Reply, Rows3, Search, Send, Settings2, Terminal, Trash2, X } from "lucide-react";
 import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type FileSnapshotOption, MovedCodeCompare } from "@/components/moved-code-compare";
@@ -354,7 +354,7 @@ function commentLocationLabel(comment: LocalReviewComment) {
   return start && start !== end ? `Lines ${start}–${end} · ${side}` : `Line ${end} · ${side}`;
 }
 
-function reviewCommand(host: string, port: string, user: string, project: string, change: number, patchset: number, input: object, heredoc = "GERRIT_REVIEW") {
+function reviewCommand(host: string, port: string, user: string, project: string, change: number, patchset: number, input: Record<string, unknown>, heredoc = "GERRIT_REVIEW") {
   const destination = `${user.trim() || "YOUR_USERNAME"}@${host}`;
   // ssh joins all command arguments into one string before Gerrit parses it. Quote
   // the complete remote command locally, while retaining quotes around the project
@@ -643,7 +643,7 @@ function RelationChainPanel({ relations }: { relations: RelatedChange[] }) {
         return relation.isCurrent || !relation.sourceUrl ? (
           <div key={`${relation.commit}:${index}`} className={`relation-item${relation.isCurrent ? " is-current" : ""}`} aria-current={relation.isCurrent ? "page" : undefined}>{content}</div>
         ) : (
-          <button key={`${relation.commit}:${index}`} type="button" className="relation-item" onClick={() => { window.location.href = `/?url=${encodeURIComponent(relation.sourceUrl!)}`; }}>{content}</button>
+          <a key={`${relation.commit}:${index}`} className="relation-item" href={`/?url=${encodeURIComponent(relation.sourceUrl)}`}>{content}</a>
         );
       })}
     </div>
@@ -931,7 +931,9 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
   }, [data.host, data.project]);
 
   const refreshSearchHighlights = useCallback(() => {
+    // SAFETY: CSS.highlights is a progressive browser API absent from the current TypeScript DOM declarations.
     const registry = (CSS as unknown as { highlights?: { set(name: string, highlight: unknown): void; delete(name: string): void } }).highlights;
+    // SAFETY: window.Highlight is checked before construction because the CSS Highlight API is optional.
     const HighlightConstructor = (window as unknown as { Highlight?: new (...ranges: Range[]) => unknown }).Highlight;
     const query = searchQuery.trim();
     const activeMatch = searchMatches[searchIndex];
@@ -971,6 +973,7 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
   useEffect(() => {
     if (searchOpen) refreshSearchHighlights();
     else {
+      // SAFETY: CSS.highlights is a progressive browser API absent from the current TypeScript DOM declarations.
       const registry = (CSS as unknown as { highlights?: { delete(name: string): void } }).highlights;
       registry?.delete(SEARCH_HIGHLIGHT_NAME);
       registry?.delete(ACTIVE_SEARCH_HIGHLIGHT_NAME);
@@ -978,7 +981,9 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
   }, [refreshSearchHighlights, searchOpen]);
 
   const refreshCommentHighlights = useCallback(() => {
+    // SAFETY: CSS.highlights is a progressive browser API absent from the current TypeScript DOM declarations.
     const registry = (CSS as unknown as { highlights?: { set(name: string, highlight: unknown): void; delete(name: string): void } }).highlights;
+    // SAFETY: window.Highlight is checked before construction because the CSS Highlight API is optional.
     const HighlightConstructor = (window as unknown as { Highlight?: new (...ranges: Range[]) => unknown }).Highlight;
     if (!registry || !HighlightConstructor) return;
     const ranges: Range[] = [];
@@ -1089,6 +1094,7 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
       containerObserver.disconnect();
       for (const observer of shadowObservers) observer.disconnect();
       cancelAnimationFrame(frame);
+      // SAFETY: CSS.highlights is a progressive browser API absent from the current TypeScript DOM declarations.
       (CSS as unknown as { highlights?: { delete(name: string): void } }).highlights?.delete(COMMENT_HIGHLIGHT_NAME);
     };
   }, [refreshCommentHighlights]);
@@ -1280,10 +1286,11 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
   }, []);
 
   const updateThreadUrl = useCallback((threadId?: string) => {
-    const url = new URL(window.location.href);
-    if (threadId) url.searchParams.set("thread", threadId);
-    else url.searchParams.delete("thread");
-    window.history.replaceState(null, "", url);
+    const params = new URLSearchParams(window.location.search);
+    if (threadId) params.set("thread", threadId);
+    else params.delete("thread");
+    const query = params.toString();
+    window.history.replaceState(null, "", `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`);
   }, []);
 
   const toggleActiveDiscussion = useCallback((key: string) => {
@@ -1588,6 +1595,7 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
 
   const initials = data.owner.name.split(/\s+/).slice(0, 2).map((word) => word[0]).join("").toUpperCase();
   const reviewers = data.reviewers ?? [];
+  const checks = data.checks ?? [];
   const voteText = (value: number | undefined) => value === undefined ? "—" : value > 0 ? `+${value}` : String(value);
   const voteClass = (value: number | undefined) => value === undefined || value === 0 ? "neutral" : value > 0 ? "positive" : "negative";
   const activeThread = activeThreadKey ? discussionThreads.find((thread) => `gerrit:${thread.key}` === activeThreadKey) : undefined;
@@ -1739,6 +1747,19 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
               </div>
             )}
           </div>
+          {checks.length > 0 && (
+            <div className="automation-results" aria-label="Automation results for this patchset">
+              <span className="automation-results-label">Checks</span>
+              {checks.map((check) => (
+                <a className={`automation-check ${check.result.toLowerCase()}`} href={check.url} target="_blank" rel="noreferrer" key={check.url}>
+                  {check.result === "SUCCESS" ? <Check size={11} /> : <X size={11} />}
+                  <strong>{check.name}</strong>
+                  <span>{check.result.replace("_", " ")}</span>
+                  <ExternalLink size={10} />
+                </a>
+              ))}
+            </div>
+          )}
         </div>
         {repositoryError && <div className="repository-error"><X size={13} /> <span>{repositoryError}</span><button onClick={() => setRepositoryError("")} aria-label="Dismiss"><X size={12} /></button></div>}
         {searchOpen && (

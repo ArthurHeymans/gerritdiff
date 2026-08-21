@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { parseGerritJson, publicFetch, resolveChange } from "@/lib/gerrit-server";
-import type { ChangeData, ComparisonFile, GerritComment, GerritReviewer, RelatedChange } from "@/lib/types";
+import type { ChangeCheck, ChangeData, ComparisonFile, GerritComment, GerritReviewer, RelatedChange } from "@/lib/types";
 
 export const runtime = "nodejs";
 
@@ -96,6 +96,27 @@ async function fetchOptionalComments(url: string) {
   } catch {
     return null;
   }
+}
+
+function automationChecks(messages: Array<{ message: string; _revision_number?: number }> | undefined, revisionNumber: number): ChangeCheck[] {
+  const checks = (messages ?? [])
+    .filter((message) => message._revision_number === revisionNumber)
+    .flatMap(({ message }) => [...message.matchAll(/(https?:\/\/\S+?)\s*:\s*(SUCCESS|FAILURE|UNSTABLE|ABORTED|NOT_BUILT)\b/gi)])
+    .flatMap((match) => {
+      try {
+        const url = new URL(match[1]);
+        const result = match[2].toUpperCase() as ChangeCheck["result"];
+        const parts = url.pathname.split("/").filter(Boolean);
+        const jobIndex = parts.lastIndexOf("job");
+        const name = jobIndex >= 0 && parts[jobIndex + 1]
+          ? `${decodeURIComponent(parts[jobIndex + 1])}${parts[jobIndex + 2] ? ` #${parts[jobIndex + 2]}` : ""}`
+          : url.hostname;
+        return [{ name, result, url: url.toString() }];
+      } catch {
+        return [];
+      }
+    });
+  return [...new Map(checks.map((check) => [check.url, check] as const)).values()];
 }
 
 function normalizeComments(input: GerritComments, origin: string, ported = false): GerritComment[] {
@@ -268,6 +289,7 @@ export async function GET(request: NextRequest) {
       };
     });
 
+    const checks = automationChecks(detail.messages, revisionNumber);
     const avatar = detail.owner.avatars?.toSorted((a, b) => b.height - a.height)[0]?.url;
     const avatarUrl = avatar ? new URL(avatar, parsed.origin).toString() : undefined;
     const data: ChangeData = {
@@ -288,6 +310,7 @@ export async function GET(request: NextRequest) {
         avatarUrl,
       },
       reviewers,
+      checks,
       revision,
       revisionNumber,
       revisions: Object.entries(detail.revisions)

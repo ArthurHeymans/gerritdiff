@@ -3,8 +3,8 @@ import Script from "next/script";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "GerritDiff — diff viewer for public Gerrit changes",
-  description: "Paste a public Gerrit change URL for a side-by-side diff, file tree, and inline discussions.",
+  title: "GerritDiff — public Gerrit review dashboard and diff viewer",
+  description: "Triage your public Gerrit review work across projects, then open fast side-by-side diffs and discussions.",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

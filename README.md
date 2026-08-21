@@ -4,6 +4,11 @@ A fast, focused diff viewer for public Gerrit changes, inspired by [DiffsHub](ht
 
 ## Features
 
+- Save a Gerrit server and public username for a personal, read-only review dashboard
+- Triage anonymously visible changes across projects as needs action, unclear, waiting, or ready
+- Filter dashboard work by owned changes, incoming reviews, project, topic, and configurable recent/inactive activity age
+- See explicit warnings when identity, attention, or dashboard queries are unavailable anonymously
+- Queue owned changes for abandonment, add a message per change, and copy one combined SSH command
 - Paste modern (`/c/project/+/123`) or legacy (`/#/c/123`) Gerrit change URLs
 - Server-side Gerrit proxy, so the browser does not depend on Gerrit CORS settings
 - Change metadata, patchset, branch, author, and file statistics
@@ -35,10 +40,11 @@ npm run build
 npm run start
 ```
 
-GerritDiff currently supports anonymously readable changes. Private Gerrit
-authentication is intentionally not included in the first version. Full repository
-tree browsing requires the Gerrit project to advertise a Gitiles web link; known
-file paths can still be opened directly through Gerrit's commit content API.
+GerritDiff currently supports anonymously readable changes. Dashboard profiles
+store only a Gerrit server URL and username in local browser storage; they do not
+authenticate to Gerrit or grant access to private changes. Full repository tree
+browsing requires the Gerrit project to advertise a Gitiles web link; known file
+paths can still be opened directly through Gerrit's commit content API.
 
 ## License
 

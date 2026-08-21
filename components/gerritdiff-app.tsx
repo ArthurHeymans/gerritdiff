@@ -1,11 +1,14 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ArrowRight, ExternalLink, LoaderCircle, Moon, Search, Sun, X } from "lucide-react";
+import { ExternalLink, LoaderCircle } from "lucide-react";
+import { HomeLink, Logo, ThemeButton, UrlForm } from "@/components/app-chrome";
 import { ChangeReview } from "@/components/change-review";
-import { setGerritDiffTheme, useGerritDiffTheme } from "@/lib/theme";
-import type { ChangeData } from "@/lib/types";
+import { Dashboard, DashboardProfileForm } from "@/components/dashboard";
+import { normalizeGerritServer } from "@/lib/gerrit-url";
+import { useGerritDiffTheme } from "@/lib/theme";
+import type { ChangeData, DashboardProfile } from "@/lib/types";
 
 const EXAMPLES = [
   {
@@ -18,75 +21,38 @@ const EXAMPLES = [
   },
 ];
 
-function Logo() {
-  return (
-    <span className="brand">
-      <svg className="logo-mark" viewBox="0 0 16 16" aria-hidden="true">
-        <rect x="0" y="2" width="7" height="2.5" rx="1" className="lm-del" />
-        <rect x="0" y="6.75" width="7" height="2.5" rx="1" opacity=".35" />
-        <rect x="0" y="11.5" width="7" height="2.5" rx="1" opacity=".35" />
-        <rect x="9" y="2" width="7" height="2.5" rx="1" opacity=".35" />
-        <rect x="9" y="6.75" width="7" height="2.5" rx="1" className="lm-add" />
-        <rect x="9" y="11.5" width="7" height="2.5" rx="1" opacity=".35" />
-      </svg>
-      <span>gerrit<b>diff</b></span>
-    </span>
-  );
+const DASHBOARD_PROFILE_KEY = "gerritdiff:dashboard-profile";
+const DASHBOARD_PROFILE_EVENT = "gerritdiff:dashboard-profile-change";
+
+function subscribeDashboardProfile(listener: () => void) {
+  window.addEventListener("storage", listener);
+  window.addEventListener(DASHBOARD_PROFILE_EVENT, listener);
+  return () => {
+    window.removeEventListener("storage", listener);
+    window.removeEventListener(DASHBOARD_PROFILE_EVENT, listener);
+  };
 }
 
-function HomeLink() {
-  return <button type="button" className="logo-link home-button" aria-label="GerritDiff home" onClick={() => window.location.assign("/")}><Logo /></button>;
+function dashboardProfileSnapshot() {
+  return window.localStorage.getItem(DASHBOARD_PROFILE_KEY) ?? "";
 }
 
-function ThemeButton() {
-  const theme = useGerritDiffTheme();
-  return (
-    <button className="icon-button" onClick={() => setGerritDiffTheme(theme === "dark" ? "light" : "dark")}  aria-label="Toggle color theme">
-      {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
-    </button>
-  );
+function saveDashboardProfile(profile: DashboardProfile | null) {
+  if (profile) window.localStorage.setItem(DASHBOARD_PROFILE_KEY, JSON.stringify(profile));
+  else window.localStorage.removeItem(DASHBOARD_PROFILE_KEY);
+  window.dispatchEvent(new Event(DASHBOARD_PROFILE_EVENT));
 }
 
-function UrlForm({ initial = "", compact = false }: { initial?: string; compact?: boolean }) {
-  const [value, setValue] = useState(initial);
-  const input = useRef<HTMLInputElement>(null);
-
-  function submit(event: { preventDefault(): void }) {
-    event.preventDefault();
-    const url = value.trim();
-    if (!url) return input.current?.focus();
-    window.location.assign(`/?url=${encodeURIComponent(url)}`);
+function parseDashboardProfile(value: string): DashboardProfile | null {
+  try {
+    const profile = JSON.parse(value) as Partial<DashboardProfile>;
+    return profile.server && profile.username ? { server: normalizeGerritServer(profile.server).toString(), username: profile.username } : null;
+  } catch {
+    return null;
   }
-
-  function clear() {
-    setValue("");
-    input.current?.focus();
-  }
-
-  return (
-    <form className={compact ? "url-form compact" : "url-form"} onSubmit={submit}>
-      <div className="url-icon"><Search size={18} /></div>
-      <input
-        ref={input}
-        value={value}
-        onChange={(event) => setValue(event.target.value)}
-        placeholder="Paste a Gerrit change URL…"
-        aria-label="Gerrit change URL"
-        spellCheck={false}
-      />
-      {value && (
-        <button type="button" className="url-clear" aria-label="Clear URL" onClick={clear}>
-          <X size={15} />
-        </button>
-      )}
-      <button type="submit" className="url-submit" aria-label="Open change" data-empty={!value.trim() || undefined}>
-        <ArrowRight size={16} />
-      </button>
-    </form>
-  );
 }
 
-function Landing() {
+function Landing({ onSaveProfile }: { onSaveProfile(profile: DashboardProfile): void }) {
   return (
     <main className="landing">
       <nav className="nav shell">
@@ -107,6 +73,8 @@ function Landing() {
             </button>
           ))}
         </div>
+
+        <DashboardProfileForm onSave={onSaveProfile} />
       </section>
 
       <footer className="footer shell">
@@ -119,11 +87,14 @@ function Landing() {
 
 function patchsetUrl(sourceUrl: string, changeNumber: number, patchset: number) {
   const url = new URL(sourceUrl);
-  const modern = new RegExp(`(/\\+/${changeNumber})(?:/\\d+)?(?:/.*)?$`);
-  if (modern.test(url.pathname)) url.pathname = url.pathname.replace(modern, `$1/${patchset}`);
-  else {
-    const legacy = new RegExp(`(/c/${changeNumber})(?:/\\d+)?(?:/.*)?$`);
-    url.hash = url.hash.replace(legacy, `$1/${patchset}`);
+  const modern = url.pathname.match(/(\/\+\/(\d+))(?:\/\d+)?(?:\/.*)?$/);
+  if (modern && Number(modern[2]) === changeNumber) {
+    url.pathname = url.pathname.replace(/(\/\+\/\d+)(?:\/\d+)?(?:\/.*)?$/, `$1/${patchset}`);
+  } else {
+    const legacy = url.hash.match(/(\/c\/(\d+))(?:\/\d+)?(?:\/.*)?$/);
+    if (legacy && Number(legacy[2]) === changeNumber) {
+      url.hash = url.hash.replace(/(\/c\/\d+)(?:\/\d+)?(?:\/.*)?$/, `$1/${patchset}`);
+    }
   }
   return url.toString();
 }
@@ -210,8 +181,12 @@ function ChangeLoader({ url, base, threadId }: { url: string; base?: string; thr
 
 export function GerritDiffApp() {
   const searchParams = useSearchParams();
+  const profileValue = useSyncExternalStore(subscribeDashboardProfile, dashboardProfileSnapshot, () => "");
+  const profile = parseDashboardProfile(profileValue);
   const url = searchParams.get("url");
   const base = searchParams.get("base") ?? undefined;
   const threadId = searchParams.get("thread") ?? undefined;
-  return url ? <ChangeLoader url={url} base={base} threadId={threadId} /> : <Landing />;
+  if (url) return <ChangeLoader url={url} base={base} threadId={threadId} />;
+  if (profile) return <Dashboard profile={profile} onForget={() => saveDashboardProfile(null)} />;
+  return <Landing onSaveProfile={saveDashboardProfile} />;
 }

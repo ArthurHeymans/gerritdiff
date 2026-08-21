@@ -48,6 +48,56 @@ export type GerritReviewer = {
   verified?: number;
 };
 
+export type DashboardProfile = {
+  server: string;
+  username: string;
+};
+
+export type DashboardScope = "mine" | "reviewing";
+export type DashboardGroup = "action" | "unclear" | "waiting" | "ready";
+export type DashboardEvidence = "explicit" | "derived" | "inferred" | "unknown";
+export type DashboardCiState = "failed" | "running" | "passed" | "unknown";
+
+export type DashboardChange = {
+  id: string;
+  sourceUrl: string;
+  changeNumber: number;
+  subject: string;
+  project: string;
+  branch: string;
+  topic?: string;
+  status: string;
+  updated: string;
+  patchset?: number;
+  owner: { name: string; username?: string; avatarUrl?: string };
+  scopes: DashboardScope[];
+  group: DashboardGroup;
+  evidence: DashboardEvidence;
+  facts: string[];
+  diagnosis: string;
+  ci: DashboardCiState;
+  unresolvedCount?: number;
+  submittable?: boolean;
+};
+
+export type DashboardWarning = {
+  source: "identity" | DashboardScope | "attention" | "details";
+  message: string;
+};
+
+export type DashboardData = {
+  server: string;
+  fetchedAt: string;
+  identity: {
+    username: string;
+    accountId?: number;
+    name?: string;
+    mode: "account" | "username";
+  };
+  changes: DashboardChange[];
+  warnings: DashboardWarning[];
+};
+
 export type ChangeData = {
   /** Gerrit's HTTP authority, used to scope UI settings and credentials. */
   host: string;

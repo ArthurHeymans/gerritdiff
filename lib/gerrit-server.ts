@@ -82,7 +82,7 @@ async function assertPublicUrl(input: string) {
 }
 
 function stripXssi(text: string): string {
-  return text.replace(/^\)\]\}'\s*/, "");
+  return text.replace(/^\uFEFF?\s*\)\]\}'\s*/, "");
 }
 
 export function parseGerritJson<T>(text: string): T {

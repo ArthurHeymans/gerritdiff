@@ -2,7 +2,7 @@
 
 import { type CodeViewItem, type CodeViewOptions, type FileDiffMetadata, parseDiffFromFile } from "@pierre/diffs";
 import { CodeView, type CodeViewHandle } from "@pierre/diffs/react";
-import { ArrowRight, ChevronDown, ChevronUp, FileText, LoaderCircle, Search, X } from "lucide-react";
+import { ChevronDown, ChevronUp, FileText, LoaderCircle, Lock, LockOpen, Search, X } from "lucide-react";
 import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createCodeViewDiffOptions, textMatchRanges, updateWhitespaceMarkers } from "@/lib/code-view";
 import type { GerritDiffTheme } from "@/lib/theme";
@@ -50,7 +50,9 @@ function SnapshotPane({
   showWhitespace,
   fileDiff,
   viewerRef,
+  containerRef,
   onPostRender,
+  onActivate,
   onPathChange,
 }: {
   label: string;
@@ -64,10 +66,11 @@ function SnapshotPane({
   showWhitespace: boolean;
   fileDiff?: FileDiffMetadata;
   viewerRef: RefObject<CodeViewHandle<unknown> | null>;
+  containerRef: RefObject<HTMLDivElement | null>;
   onPostRender(): void;
+  onActivate(): void;
   onPathChange(path: string): void;
 }) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
   const itemId = `${label}:${path}`;
   const codeViewOptions = useMemo<CodeViewOptions<unknown>>(() => {
     const visibleSide = tone === "deletion" ? "deletions" : "additions";
@@ -115,7 +118,7 @@ function SnapshotPane({
     requestAnimationFrame(() => requestAnimationFrame(() => {
       containerRef.current?.scrollTo({ top: scrollTop, left: scrollLeft });
     }));
-  }, [fileDiff, itemId, viewerRef]);
+  }, [containerRef, fileDiff, itemId, viewerRef]);
 
   useEffect(() => {
     for (const rendered of viewerRef.current?.getInstance()?.getRenderedItems() ?? []) {
@@ -125,7 +128,7 @@ function SnapshotPane({
   }, [showWhitespace, viewerRef]);
 
   return (
-    <section className={`moved-code-pane is-${tone}`}>
+    <section className={`moved-code-pane is-${tone}`} onPointerDown={onActivate} onFocusCapture={onActivate}>
       <header>
         <span>{label}</span>
         <strong>{revisionLabel}</strong>
@@ -175,10 +178,15 @@ export function MovedCodeCompare({
 }) {
   const oldViewerRef = useRef<CodeViewHandle<unknown> | null>(null);
   const newViewerRef = useRef<CodeViewHandle<unknown> | null>(null);
+  const oldContainerRef = useRef<HTMLDivElement | null>(null);
+  const newContainerRef = useRef<HTMLDivElement | null>(null);
+  const activePaneRef = useRef<"old" | "new">("old");
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [oldPath, setOldPath] = useState(() => preferredPath(oldFiles));
   const [newPath, setNewPath] = useState(() => preferredPath(newFiles));
   const [searchOpen, setSearchOpen] = useState(false);
+  const [scrollLocked, setScrollLocked] = useState(false);
+  const [activeHunkIndex, setActiveHunkIndex] = useState(-1);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchIndex, setSearchIndex] = useState(0);
   const [loadedOld, setLoadedOld] = useState<{ path: string; state: SnapshotState } | null>(null);
@@ -262,6 +270,7 @@ export function MovedCodeCompare({
   useEffect(() => {
     if (!searchOpen || !searchMatches.length) return;
     const match = searchMatches[Math.min(searchIndex, searchMatches.length - 1)];
+    activePaneRef.current = match.side;
     const viewer = match.side === "old" ? oldViewerRef.current : newViewerRef.current;
     viewer?.scrollTo({
       type: "line",
@@ -288,6 +297,65 @@ export function MovedCodeCompare({
     };
   }, [refreshSearchHighlights, searchOpen]);
 
+  const hunkCount = crossFileDiff?.hunks.length ?? 0;
+  const visibleHunkIndex = hunkCount ? Math.min(activeHunkIndex, hunkCount - 1) : -1;
+
+  const activatePane = useCallback((side: "old" | "new") => {
+    activePaneRef.current = side;
+  }, []);
+
+  const toggleScrollLock = useCallback(() => {
+    if (!scrollLocked) {
+      const anchor = activePaneRef.current === "old" ? oldContainerRef.current : newContainerRef.current;
+      const follower = activePaneRef.current === "old" ? newContainerRef.current : oldContainerRef.current;
+      if (anchor && follower) follower.scrollTop = anchor.scrollTop;
+    }
+    setScrollLocked((current) => !current);
+  }, [scrollLocked]);
+
+  const navigateHunk = useCallback((direction: -1 | 1) => {
+    if (!crossFileDiff?.hunks.length) return;
+    const lastIndex = crossFileDiff.hunks.length - 1;
+    const currentIndex = Math.min(activeHunkIndex, lastIndex);
+    const nextIndex = direction > 0
+      ? Math.min(currentIndex < 0 ? 0 : currentIndex + 1, lastIndex)
+      : Math.max(currentIndex < 0 ? 0 : currentIndex - 1, 0);
+    const hunk = crossFileDiff.hunks[nextIndex];
+    const oldLine = Math.max(1, Math.min(hunk.deletionStart, crossFileDiff.deletionLines.length));
+    const newLine = Math.max(1, Math.min(hunk.additionStart, crossFileDiff.additionLines.length));
+    oldViewerRef.current?.scrollTo({ type: "line", id: `Before:${oldPath}`, lineNumber: oldLine, side: "deletions", align: "center" });
+    newViewerRef.current?.scrollTo({ type: "line", id: `After:${newPath}`, lineNumber: newLine, side: "additions", align: "center" });
+    setActiveHunkIndex(nextIndex);
+  }, [activeHunkIndex, crossFileDiff, newPath, oldPath]);
+
+  useEffect(() => {
+    const oldContainer = oldContainerRef.current;
+    const newContainer = newContainerRef.current;
+    if (!oldContainer || !newContainer) return;
+    const synchronize = (source: HTMLDivElement, target: HTMLDivElement, side: "old" | "new") => {
+      if (!scrollLocked) {
+        activatePane(side);
+        return;
+      }
+      if (activePaneRef.current !== side) return;
+      target.scrollTop = source.scrollTop;
+    };
+    const activateOld = () => activatePane("old");
+    const activateNew = () => activatePane("new");
+    const syncFromOld = () => synchronize(oldContainer, newContainer, "old");
+    const syncFromNew = () => synchronize(newContainer, oldContainer, "new");
+    oldContainer.addEventListener("wheel", activateOld, { passive: true });
+    newContainer.addEventListener("wheel", activateNew, { passive: true });
+    oldContainer.addEventListener("scroll", syncFromOld, { passive: true });
+    newContainer.addEventListener("scroll", syncFromNew, { passive: true });
+    return () => {
+      oldContainer.removeEventListener("wheel", activateOld);
+      newContainer.removeEventListener("wheel", activateNew);
+      oldContainer.removeEventListener("scroll", syncFromOld);
+      newContainer.removeEventListener("scroll", syncFromNew);
+    };
+  }, [activatePane, crossFileDiff, newPath, oldPath, scrollLocked]);
+
   useEffect(() => {
     if (!oldOption || oldOption.content !== undefined) return;
     let active = true;
@@ -310,47 +378,63 @@ export function MovedCodeCompare({
     <div className="moved-code-compare">
       <div className="moved-code-intro">
         <span>Moved code comparison</span>
-        <p>Choose an old file and a new file. Each side scrolls independently.</p>
-        {searchOpen && (
-          <form
-            className="code-search moved-code-search"
-            role="search"
-            onSubmit={(event) => {
-              event.preventDefault();
-              if (searchMatches.length) setSearchIndex((current) => (current + 1) % searchMatches.length);
-            }}
-          >
-            <Search size={14} />
-            <input
-              ref={searchInputRef}
-              type="search"
-              aria-label="Find in compared files"
-              placeholder="Find in compared files"
-              value={searchQuery}
-              onChange={(event) => { setSearchQuery(event.target.value); setSearchIndex(0); }}
-              onKeyDown={(event) => {
-                if (event.key === "Escape") {
-                  event.preventDefault();
-                  setSearchOpen(false);
-                  setSearchQuery("");
-                } else if (event.key === "Enter" && event.shiftKey && searchMatches.length) {
-                  event.preventDefault();
-                  setSearchIndex((current) => (current - 1 + searchMatches.length) % searchMatches.length);
-                }
-              }}
-            />
-            <span>{searchQuery.trim() ? searchMatches.length ? `${Math.min(searchIndex + 1, searchMatches.length)} / ${searchMatches.length}` : "No results" : ""}</span>
-            <button type="button" disabled={!searchMatches.length} aria-label="Previous match" onClick={() => setSearchIndex((current) => (current - 1 + searchMatches.length) % searchMatches.length)}><ChevronUp size={13} /></button>
-            <button type="submit" disabled={!searchMatches.length} aria-label="Next match"><ChevronDown size={13} /></button>
-            <button type="button" aria-label="Close search" onClick={() => { setSearchOpen(false); setSearchQuery(""); }}><X size={13} /></button>
-          </form>
-        )}
+        <p>Choose an old file and a new file.</p>
         <button type="button" onClick={onClose}><X size={13} /> Close</button>
       </div>
+      {searchOpen && (
+        <form
+          className="code-search moved-code-search"
+          role="search"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (searchMatches.length) setSearchIndex((current) => (current + 1) % searchMatches.length);
+          }}
+        >
+          <Search size={14} />
+          <input
+            ref={searchInputRef}
+            type="search"
+            aria-label="Find in compared files"
+            placeholder="Find in compared files"
+            value={searchQuery}
+            onChange={(event) => { setSearchQuery(event.target.value); setSearchIndex(0); }}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                setSearchOpen(false);
+                setSearchQuery("");
+              } else if (event.key === "Enter" && event.shiftKey && searchMatches.length) {
+                event.preventDefault();
+                setSearchIndex((current) => (current - 1 + searchMatches.length) % searchMatches.length);
+              }
+            }}
+          />
+          <span>{searchQuery.trim() ? searchMatches.length ? `${Math.min(searchIndex + 1, searchMatches.length)} / ${searchMatches.length}` : "No results" : ""}</span>
+          <button type="button" disabled={!searchMatches.length} aria-label="Previous match" onClick={() => setSearchIndex((current) => (current - 1 + searchMatches.length) % searchMatches.length)}><ChevronUp size={13} /></button>
+          <button type="submit" disabled={!searchMatches.length} aria-label="Next match"><ChevronDown size={13} /></button>
+          <button type="button" aria-label="Close search" onClick={() => { setSearchOpen(false); setSearchQuery(""); }}><X size={13} /></button>
+        </form>
+      )}
       <div className="moved-code-grid">
-        <SnapshotPane key={`before:${oldPath}:${newPath}`} label="Before" tone="deletion" revisionLabel={baseLabel} options={oldFiles} path={oldPath} state={oldState} theme={theme} tabSize={tabSize} showWhitespace={showWhitespace} fileDiff={crossFileDiff} viewerRef={oldViewerRef} onPostRender={refreshSearchHighlights} onPathChange={setOldPath} />
-        <span className="moved-code-direction" aria-hidden="true"><ArrowRight size={14} /></span>
-        <SnapshotPane key={`after:${oldPath}:${newPath}`} label="After" tone="addition" revisionLabel={targetLabel} options={newFiles} path={newPath} state={newState} theme={theme} tabSize={tabSize} showWhitespace={showWhitespace} fileDiff={crossFileDiff} viewerRef={newViewerRef} onPostRender={refreshSearchHighlights} onPathChange={setNewPath} />
+        <SnapshotPane key={`before:${oldPath}:${newPath}`} label="Before" tone="deletion" revisionLabel={baseLabel} options={oldFiles} path={oldPath} state={oldState} theme={theme} tabSize={tabSize} showWhitespace={showWhitespace} fileDiff={crossFileDiff} viewerRef={oldViewerRef} containerRef={oldContainerRef} onPostRender={refreshSearchHighlights} onActivate={() => activatePane("old")} onPathChange={(path) => { setOldPath(path); setActiveHunkIndex(-1); }} />
+        <div className="moved-code-direction">
+          <button
+            type="button"
+            className={scrollLocked ? "active" : ""}
+            aria-pressed={scrollLocked}
+            aria-label={scrollLocked ? "Unlock vertical scrolling" : "Lock vertical scrolling"}
+            title={scrollLocked ? "Unlock vertical scrolling" : "Lock vertical scrolling at the current alignment"}
+            onClick={toggleScrollLock}
+          >
+            {scrollLocked ? <Lock size={14} /> : <LockOpen size={14} />}
+          </button>
+          <div className="moved-code-hunk-nav" aria-label="Diff hunk navigation">
+            <button type="button" disabled={!hunkCount || visibleHunkIndex <= 0} aria-label="Previous hunk" title="Previous hunk" onClick={() => navigateHunk(-1)}><ChevronUp size={13} /></button>
+            <small>{hunkCount ? `${visibleHunkIndex < 0 ? "–" : visibleHunkIndex + 1}/${hunkCount}` : "0/0"}</small>
+            <button type="button" disabled={!hunkCount || visibleHunkIndex >= hunkCount - 1} aria-label="Next hunk" title="Next hunk" onClick={() => navigateHunk(1)}><ChevronDown size={13} /></button>
+          </div>
+        </div>
+        <SnapshotPane key={`after:${oldPath}:${newPath}`} label="After" tone="addition" revisionLabel={targetLabel} options={newFiles} path={newPath} state={newState} theme={theme} tabSize={tabSize} showWhitespace={showWhitespace} fileDiff={crossFileDiff} viewerRef={newViewerRef} containerRef={newContainerRef} onPostRender={refreshSearchHighlights} onActivate={() => activatePane("new")} onPathChange={(path) => { setNewPath(path); setActiveHunkIndex(-1); }} />
       </div>
     </div>
   );

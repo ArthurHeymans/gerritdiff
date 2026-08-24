@@ -255,6 +255,13 @@ function classifyReviewingChange(
   return { group: "unclear", evidence: "inferred", diagnosis: "Likely needs triage; attention data is unavailable" };
 }
 
+function classifyUnrelatedChange(change: GerritChange): Classification {
+  if (change.work_in_progress) return { group: "waiting", evidence: "explicit", diagnosis: "Work in progress outside your review scope" };
+  if (change.mergeable === false) return { group: "waiting", evidence: "explicit", diagnosis: "Open change outside your review scope with a merge conflict" };
+  if (change.submittable) return { group: "ready", evidence: "explicit", diagnosis: "Open change outside your review scope is submittable" };
+  return { group: "waiting", evidence: "explicit", diagnosis: "Open change outside your review scope" };
+}
+
 function requirementFact(name: string) {
   if (/owners?|code[- ]review from owners/i.test(name)) return "Needs owner approval";
   if (/^code[- ]review$/i.test(name)) return "Needs Code-Review +2";
@@ -306,7 +313,9 @@ function classify({
   ])];
   const classification = scopes.includes("mine")
     ? classifyOwnedChange({ change, ci, negative, unresolved, conflict, stackBlockers })
-    : classifyReviewingChange(change, labels, identity, attentionAvailable);
+    : scopes.includes("reviewing")
+      ? classifyReviewingChange(change, labels, identity, attentionAvailable)
+      : classifyUnrelatedChange(change);
 
   return {
     id: change.id,
@@ -339,6 +348,7 @@ function classify({
 export async function GET(request: NextRequest) {
   const serverInput = request.nextUrl.searchParams.get("server")?.trim();
   const accountInput = request.nextUrl.searchParams.get("account")?.trim();
+  const includeEverything = request.nextUrl.searchParams.get("scope") === "everything";
   const accountId = accountInput && /^\d+$/.test(accountInput) ? Number(accountInput) : undefined;
   const username = request.nextUrl.searchParams.get("username")?.trim() ?? accountInput;
   if (!serverInput || !username) {
@@ -358,6 +368,7 @@ export async function GET(request: NextRequest) {
       queryChanges(server, `owner:${identityQuery} status:open`),
       queryChanges(server, `reviewer:${identityQuery} status:open`),
       queryChanges(server, `attention:${identityQuery} status:open`),
+      ...(includeEverything ? [queryChanges(server, "status:open")] : []),
     ]);
     if (queries.every((result) => result.status === "rejected")) {
       const first = queries[0];
@@ -379,8 +390,8 @@ export async function GET(request: NextRequest) {
 
     const scopesById = new Map<string, Set<DashboardScope>>();
     const changesById = new Map<string, GerritChange>();
-    const sources: ("mine" | "reviewing" | "attention")[] = ["mine", "reviewing", "attention"];
-    const sourceLabel = { mine: "Owned changes", reviewing: "Incoming reviews", attention: "Attention" };
+    const sources: ("mine" | "reviewing" | "attention" | "everything")[] = ["mine", "reviewing", "attention", "everything"];
+    const sourceLabel = { mine: "Owned changes", reviewing: "Incoming reviews", attention: "Attention", everything: "All changes" };
     queries.forEach((result, index) => {
       const source = sources[index];
       if (result.status === "rejected") {
@@ -391,7 +402,7 @@ export async function GET(request: NextRequest) {
       for (const change of result.value.changes) {
         changesById.set(change.id, change);
         const scopes = scopesById.get(change.id) ?? new Set<DashboardScope>();
-        scopes.add(source === "mine" ? "mine" : "reviewing");
+        scopes.add(source === "mine" ? "mine" : source === "everything" ? "everything" : "reviewing");
         scopesById.set(change.id, scopes);
       }
     });
@@ -410,7 +421,9 @@ export async function GET(request: NextRequest) {
     const stackBlockersById = new Map(stackBlockerEntries);
     const changes = [...changesById.values()].map((change) => {
       const scopes = [...(scopesById.get(change.id) ?? new Set<DashboardScope>())];
-      const normalizedScopes: DashboardScope[] = scopes.includes("mine") ? ["mine"] : scopes;
+      const normalizedScopes: DashboardScope[] = scopes.includes("mine")
+        ? ["mine", ...(scopes.includes("everything") ? ["everything" as const] : [])]
+        : scopes;
       return classify({ server, change, scopes: normalizedScopes, identity, attentionAvailable, stackBlockers: stackBlockersById.get(change.id) });
     });
 

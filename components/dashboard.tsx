@@ -46,7 +46,7 @@ function readUrlViewState(searchParams: Pick<URLSearchParams, "get">, fallback: 
   const sort = searchParams.get("sort");
   return {
     ...fallback,
-    scope: scope === "all" || scope === "mine" || scope === "reviewing" ? scope : fallback.scope,
+    scope: scope === "all" || scope === "mine" || scope === "reviewing" || scope === "everything" ? scope : fallback.scope,
     workState: workState === "all" || GROUPS.some((group) => group.id === workState) ? workState as "all" | DashboardGroup : fallback.workState,
     wipFilter: wipFilter === "wip" || wipFilter === "reviewable" ? wipFilter : fallback.wipFilter,
     project: searchParams.get("project") ?? fallback.project,
@@ -161,7 +161,7 @@ function saveViewState(profile: DashboardProfile, state: DashboardViewState) {
   window.sessionStorage.setItem(viewStateKey(profile), JSON.stringify({ scrollY: state.scrollY }));
 }
 
-const DASHBOARD_CACHE_VERSION = 3;
+const DASHBOARD_CACHE_VERSION = 4;
 const DASHBOARD_DATA_EVENT = "gerritdiff:dashboard-data-change";
 
 function dashboardDataKey(profile: DashboardProfile) {
@@ -223,6 +223,12 @@ function confidenceLabel(change: DashboardChange) {
   if (change.evidence === "derived") return "Computed from complete Gerrit data";
   if (change.evidence === "inferred") return "Best guess from available activity";
   return "Not enough data for a confident conclusion";
+}
+
+function changeMatchesScope(change: DashboardChange, scope: "all" | DashboardScope) {
+  if (scope === "everything") return true;
+  if (scope === "all") return change.scopes.includes("mine") || change.scopes.includes("reviewing");
+  return change.scopes.includes(scope);
 }
 
 function ChangeRow({
@@ -416,8 +422,9 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
     const controller = new AbortController();
     const requestProfile = { server: profileServer, username: profileUsername, accountId: profileAccountId };
     const identityQuery = profileAccountId === undefined ? "" : `&account=${profileAccountId}`;
+    const scopeQuery = scope === "everything" ? "&scope=everything" : "";
     // Keep this request version paired with DASHBOARD_CACHE_VERSION so API shape changes also invalidate session data.
-    fetch(`/api/dashboard?v=${DASHBOARD_CACHE_VERSION}&server=${encodeURIComponent(profileServer)}&username=${encodeURIComponent(profileUsername)}${identityQuery}`, { signal: controller.signal })
+    fetch(`/api/dashboard?v=${DASHBOARD_CACHE_VERSION}&server=${encodeURIComponent(profileServer)}&username=${encodeURIComponent(profileUsername)}${identityQuery}${scopeQuery}`, { signal: controller.signal })
       .then(async (response) => {
         const body = await response.json();
         if (!response.ok) throw new Error(body.error ?? "The dashboard could not be loaded.");
@@ -438,7 +445,7 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
         setIsRefreshing(false);
       });
     return () => controller.abort();
-  }, [profileAccountId, profileServer, profileUsername, refresh]);
+  }, [profileAccountId, profileServer, profileUsername, refresh, scope]);
 
   function currentViewState(): DashboardViewState {
     return { scope, workState, wipFilter, project, topic, sort, activityAgeFilter, scrollY: window.scrollY };
@@ -490,10 +497,10 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
     if (activityAgeFilter < 0) return days <= Math.abs(activityAgeFilter);
     return true;
   }), [activityAgeFilter, data, project]);
-  const topicOptionsSource = useMemo(() => projectFiltered.filter((change) => scope === "all" || change.scopes.includes(scope)), [projectFiltered, scope]);
+  const topicOptionsSource = useMemo(() => projectFiltered.filter((change) => changeMatchesScope(change, scope)), [projectFiltered, scope]);
   const topics = useMemo(() => [...new Set(topicOptionsSource.flatMap((change) => change.topic ? [change.topic] : []))].sort(), [topicOptionsSource]);
   const topicFiltered = useMemo(() => projectFiltered.filter((change) => topic === "all" || change.topic === topic), [projectFiltered, topic]);
-  const scopedForWipCounts = useMemo(() => topicFiltered.filter((change) => scope === "all" || change.scopes.includes(scope)), [scope, topicFiltered]);
+  const scopedForWipCounts = useMemo(() => topicFiltered.filter((change) => changeMatchesScope(change, scope)), [scope, topicFiltered]);
   const wipCounts = {
     all: scopedForWipCounts.length,
     wip: scopedForWipCounts.filter((change) => change.status === "WIP").length,
@@ -503,11 +510,12 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
     wipFilter === "all" || (wipFilter === "wip" ? change.status === "WIP" : change.status !== "WIP")
   )), [topicFiltered, wipFilter]);
   const counts = {
-    all: wipFiltered.length,
+    all: wipFiltered.filter((change) => change.scopes.includes("mine") || change.scopes.includes("reviewing")).length,
     mine: wipFiltered.filter((change) => change.scopes.includes("mine")).length,
     reviewing: wipFiltered.filter((change) => change.scopes.includes("reviewing")).length,
+    everything: wipFiltered.length,
   };
-  const scoped = useMemo(() => wipFiltered.filter((change) => scope === "all" || change.scopes.includes(scope)), [scope, wipFiltered]);
+  const scoped = useMemo(() => wipFiltered.filter((change) => changeMatchesScope(change, scope)), [scope, wipFiltered]);
   const stateCounts = Object.fromEntries(GROUPS.map(({ id }) => [id, scoped.filter((change) => change.group === id).length])) as Record<DashboardGroup, number>;
   const visible = useMemo(() => scoped.filter((change) => workState === "all" || change.group === workState), [scoped, workState]);
   const grouped = useMemo(() => Object.fromEntries(GROUPS.map(({ id }) => [
@@ -547,9 +555,9 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
         <aside className="dashboard-sidebar">
           <section>
             <h2>Scope</h2>
-            {(["all", "mine", "reviewing"] as const).map((value) => (
+            {(["all", "mine", "reviewing", "everything"] as const).map((value) => (
               <button key={value} type="button" className={scope === value ? "active" : ""} onClick={() => { setScope(value); setTopic("all"); }}>
-                <span>{value === "all" ? "All work" : value === "mine" ? "Mine" : "Reviewing"}</span><b>{counts[value]}</b>
+                <span>{value === "all" ? "All work" : value === "mine" ? "Mine" : value === "reviewing" ? "Reviewing" : "Everything"}</span><b>{counts[value]}</b>
               </button>
             ))}
           </section>

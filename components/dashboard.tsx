@@ -12,6 +12,7 @@ type DashboardViewState = {
   workState: "all" | DashboardGroup;
   wipFilter: "all" | "wip" | "reviewable";
   project: string;
+  owner: string;
   topic: string;
   sort: "priority" | "freshest" | "oldest";
   activityAgeFilter: number;
@@ -23,6 +24,7 @@ const DEFAULT_VIEW_STATE: DashboardViewState = {
   workState: "all",
   wipFilter: "all",
   project: "all",
+  owner: "all",
   topic: "all",
   sort: "priority",
   activityAgeFilter: 0,
@@ -50,6 +52,7 @@ function readUrlViewState(searchParams: Pick<URLSearchParams, "get">, fallback: 
     workState: workState === "all" || GROUPS.some((group) => group.id === workState) ? workState as "all" | DashboardGroup : fallback.workState,
     wipFilter: wipFilter === "wip" || wipFilter === "reviewable" ? wipFilter : fallback.wipFilter,
     project: searchParams.get("project") ?? fallback.project,
+    owner: searchParams.get("owner") ?? fallback.owner,
     topic: searchParams.get("topic") ?? fallback.topic,
     sort: sort === "freshest" || sort === "oldest" ? sort : fallback.sort,
     activityAgeFilter: parseActivityAge(searchParams.get("age"), fallback.activityAgeFilter),
@@ -67,6 +70,7 @@ function dashboardSearchParams(profile: DashboardProfile, state: DashboardViewSt
   params.set("state", state.workState);
   if (state.wipFilter !== "all") params.set("wip", state.wipFilter);
   if (state.project !== "all") params.set("project", state.project);
+  if (state.owner !== "all") params.set("owner", state.owner);
   if (state.topic !== "all") params.set("topic", state.topic);
   if (state.sort !== "priority") params.set("sort", state.sort);
   if (state.activityAgeFilter > 0) params.set("age", `inactive:${state.activityAgeFilter}`);
@@ -397,6 +401,7 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
   const mergedView = workState === "merged";
   const [wipFilter, setWipFilter] = useState<"all" | "wip" | "reviewable">(initialViewState.wipFilter);
   const [project, setProject] = useState(initialViewState.project);
+  const [owner, setOwner] = useState(initialViewState.owner);
   const [topic, setTopic] = useState(initialViewState.topic);
   const [sort, setSort] = useState<"priority" | "freshest" | "oldest">(initialViewState.sort);
   const [activityAgeFilter, setActivityAgeFilter] = useState(initialViewState.activityAgeFilter);
@@ -407,12 +412,12 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
   const [shareCopied, setShareCopied] = useState<"exact" | "filters" | null>(null);
 
   useEffect(() => {
-    const state = { scope, workState, wipFilter, project, topic, sort, activityAgeFilter, scrollY: window.scrollY };
+    const state = { scope, workState, wipFilter, project, owner, topic, sort, activityAgeFilter, scrollY: window.scrollY };
     saveViewState(profile, state);
     const canonical = dashboardSearchParams(profile, state, profile.accountId);
     const target = `/dashboard?${canonical}`;
     if (pathname !== "/dashboard" || searchParams.toString() !== canonical.toString()) router.replace(target, { scroll: false });
-  }, [activityAgeFilter, pathname, profile, project, router, scope, searchParams, sort, topic, wipFilter, workState]);
+  }, [activityAgeFilter, owner, pathname, profile, project, router, scope, searchParams, sort, topic, wipFilter, workState]);
 
   useEffect(() => {
     if (!data || initialScrollY <= 0) return;
@@ -451,7 +456,7 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
   }, [mergedView, profileAccountId, profileServer, profileUsername, refresh, scope]);
 
   function currentViewState(): DashboardViewState {
-    return { scope, workState, wipFilter, project, topic, sort, activityAgeFilter, scrollY: window.scrollY };
+    return { scope, workState, wipFilter, project, owner, topic, sort, activityAgeFilter, scrollY: window.scrollY };
   }
 
   function openChange(change: DashboardChange) {
@@ -500,9 +505,12 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
     if (activityAgeFilter < 0) return days <= Math.abs(activityAgeFilter);
     return true;
   }), [activityAgeFilter, data, project]);
-  const topicOptionsSource = useMemo(() => projectFiltered.filter((change) => changeMatchesScope(change, scope)), [projectFiltered, scope]);
+  const owners = useMemo(() => [...new Map(projectFiltered.map((change) => [change.owner.username ?? change.owner.name, change.owner.name])).entries()]
+    .toSorted((left, right) => left[1].localeCompare(right[1])), [projectFiltered]);
+  const ownerFiltered = useMemo(() => projectFiltered.filter((change) => owner === "all" || (change.owner.username ?? change.owner.name) === owner), [owner, projectFiltered]);
+  const topicOptionsSource = useMemo(() => ownerFiltered.filter((change) => changeMatchesScope(change, scope)), [ownerFiltered, scope]);
   const topics = useMemo(() => [...new Set(topicOptionsSource.flatMap((change) => change.topic ? [change.topic] : []))].sort(), [topicOptionsSource]);
-  const topicFiltered = useMemo(() => projectFiltered.filter((change) => topic === "all" || change.topic === topic), [projectFiltered, topic]);
+  const topicFiltered = useMemo(() => ownerFiltered.filter((change) => topic === "all" || change.topic === topic), [ownerFiltered, topic]);
   const scopedForWipCounts = useMemo(() => topicFiltered.filter((change) => changeMatchesScope(change, scope)), [scope, topicFiltered]);
   const wipCounts = {
     all: scopedForWipCounts.length,
@@ -600,6 +608,10 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
           <select aria-label="Filter by project" value={project} onChange={(event) => { setProject(event.target.value); setTopic("all"); }}>
             <option value="all">All projects</option>
             {projects.map((value) => <option key={value} value={value}>{value}</option>)}
+          </select>
+          <select aria-label="Filter by change owner" value={owner} onChange={(event) => { setOwner(event.target.value); setTopic("all"); }}>
+            <option value="all">All owners</option>
+            {owners.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
           </select>
           <select aria-label="Filter by topic" value={topic} onChange={(event) => setTopic(event.target.value)}>
             <option value="all">All topics</option>

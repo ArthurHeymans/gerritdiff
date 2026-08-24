@@ -46,8 +46,8 @@ function readUrlViewState(searchParams: Pick<URLSearchParams, "get">, fallback: 
   const sort = searchParams.get("sort");
   return {
     ...fallback,
-    scope: scope === "mine" || scope === "reviewing" ? scope : fallback.scope,
-    workState: GROUPS.some((group) => group.id === workState) ? workState as DashboardGroup : fallback.workState,
+    scope: scope === "all" || scope === "mine" || scope === "reviewing" ? scope : fallback.scope,
+    workState: workState === "all" || GROUPS.some((group) => group.id === workState) ? workState as "all" | DashboardGroup : fallback.workState,
     wipFilter: wipFilter === "wip" || wipFilter === "reviewable" ? wipFilter : fallback.wipFilter,
     project: searchParams.get("project") ?? fallback.project,
     topic: searchParams.get("topic") ?? fallback.topic,
@@ -63,8 +63,8 @@ function dashboardSearchParams(profile: DashboardProfile, state: DashboardViewSt
     params.set("user", profile.username);
     if (accountId !== undefined) params.set("account", String(accountId));
   }
-  if (state.scope !== "all") params.set("scope", state.scope);
-  if (state.workState !== "all") params.set("state", state.workState);
+  params.set("scope", state.scope);
+  params.set("state", state.workState);
   if (state.wipFilter !== "all") params.set("wip", state.wipFilter);
   if (state.project !== "all") params.set("project", state.project);
   if (state.topic !== "all") params.set("topic", state.topic);

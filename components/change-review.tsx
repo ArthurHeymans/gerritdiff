@@ -1683,20 +1683,22 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
                 {data.revisions.map((revision) => <option key={revision.revision} value={revision.number}>{revision.number}{revision.number === data.revisions.at(-1)?.number ? " (latest)" : ""}</option>)}
               </select>
             </div>
-            <button
-              type="button"
-              className="relation-chain-button"
-              aria-expanded={relationPanelOpen}
-              title={`${data.relationChain.length} change${data.relationChain.length === 1 ? "" : "s"} in the relation chain`}
-              onClick={() => {
-                updateThreadUrl();
-                setRightPanel(relationPanelOpen ? null : { kind: "relation" });
-              }}
-            >
-              <GitBranch size={12} />
-              <span>Relation chain</span>
-              <b>{data.relationChain.length}</b>
-            </button>
+            {data.relationChain.length > 1 && (
+              <button
+                type="button"
+                className="relation-chain-button"
+                aria-expanded={relationPanelOpen}
+                title={`${data.relationChain.length} changes in the relation chain`}
+                onClick={() => {
+                  updateThreadUrl();
+                  setRightPanel(relationPanelOpen ? null : { kind: "relation" });
+                }}
+              >
+                <GitBranch size={12} />
+                <span>Relation chain</span>
+                <b>{data.relationChain.length}</b>
+              </button>
+            )}
             <button
               type="button"
               className={`patchset-discussions-button${unresolvedPatchsetDiscussionCount > 0 ? " has-unresolved" : ""}`}

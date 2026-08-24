@@ -185,6 +185,11 @@ function sourceUrl(server: URL, change: GerritChange) {
   return endpoint(server, `c/${project}/+/${change._number}`).toString();
 }
 
+async function stackBlockerCount(server: URL, change: GerritChange) {
+  const together = await fetchJson<GerritChange[]>(endpoint(server, `changes/${change._number}/submitted_together`));
+  return together.filter((related) => related.id !== change.id && related.status === "NEW" && related.submittable === false).length;
+}
+
 type Classification = Pick<DashboardChange, "group" | "evidence" | "diagnosis">;
 
 function classifyOwnedChange({
@@ -193,17 +198,22 @@ function classifyOwnedChange({
   negative,
   unresolved,
   conflict,
+  stackBlockers,
 }: {
   change: GerritChange;
   ci: { state: DashboardCiState };
   negative: [string, GerritLabel] | undefined;
   unresolved: number | undefined;
   conflict: boolean;
+  stackBlockers: number;
 }): Classification {
   if (conflict) return { group: "action", evidence: "explicit", diagnosis: "Your change has a merge conflict" };
   if (negative) return { group: "action", evidence: "explicit", diagnosis: `Blocked by ${negative[0]}` };
   if (ci.state === "failed") return { group: "action", evidence: "explicit", diagnosis: "CI failed on your change" };
   if (unresolved) return { group: "action", evidence: "explicit", diagnosis: "Your change has unresolved feedback" };
+  if (change.submittable && stackBlockers > 0) {
+    return { group: "ready-stuck", evidence: "explicit", diagnosis: `Ready, but ${stackBlockers} related change${stackBlockers === 1 ? " is" : "s are"} not submittable` };
+  }
   if (change.submittable) return { group: "ready", evidence: "explicit", diagnosis: "All known submit requirements are satisfied" };
   return {
     group: "waiting",
@@ -257,12 +267,14 @@ function classify({
   scopes,
   identity,
   attentionAvailable,
+  stackBlockers = 0,
 }: {
   server: URL;
   change: GerritChange;
   scopes: DashboardScope[];
   identity: Identity;
   attentionAvailable: boolean;
+  stackBlockers?: number;
 }): DashboardChange {
   const labels = change.labels ?? {};
   const ci = ciState(labels);
@@ -290,9 +302,10 @@ function classify({
     ...(negative ? [`${negative[0]} blocked`] : []),
     ...(ci.fact ? [ci.fact] : []),
     ...(unresolved ? [`${unresolved} unresolved`] : []),
+    ...(stackBlockers ? [`${stackBlockers} blocked stack change${stackBlockers === 1 ? "" : "s"}`] : []),
   ])];
   const classification = scopes.includes("mine")
-    ? classifyOwnedChange({ change, ci, negative, unresolved, conflict })
+    ? classifyOwnedChange({ change, ci, negative, unresolved, conflict, stackBlockers })
     : classifyReviewingChange(change, labels, identity, attentionAvailable);
 
   return {
@@ -384,10 +397,21 @@ export async function GET(request: NextRequest) {
     });
 
     const attentionAvailable = queries[2].status === "fulfilled";
+    const readyOwnedChanges = [...changesById.values()].filter((change) => (
+      change.submittable && scopesById.get(change.id)?.has("mine")
+    ));
+    const stackBlockerEntries = await Promise.all(readyOwnedChanges.map(async (change) => {
+      try {
+        return [change.id, await stackBlockerCount(server, change)] as const;
+      } catch {
+        return [change.id, 0] as const;
+      }
+    }));
+    const stackBlockersById = new Map(stackBlockerEntries);
     const changes = [...changesById.values()].map((change) => {
       const scopes = [...(scopesById.get(change.id) ?? new Set<DashboardScope>())];
       const normalizedScopes: DashboardScope[] = scopes.includes("mine") ? ["mine"] : scopes;
-      return classify({ server, change, scopes: normalizedScopes, identity, attentionAvailable });
+      return classify({ server, change, scopes: normalizedScopes, identity, attentionAvailable, stackBlockers: stackBlockersById.get(change.id) });
     });
 
     const data: DashboardData = {

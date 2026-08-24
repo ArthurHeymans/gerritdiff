@@ -78,6 +78,7 @@ const GROUPS: { id: DashboardGroup; label: string; hint: string }[] = [
   { id: "action", label: "Needs your action", hint: "explicit blockers, then oldest first" },
   { id: "unclear", label: "Unclear · you decide", hint: "insufficient evidence for a confident turn" },
   { id: "waiting", label: "Waiting on others", hint: "surface stale waits as nudges" },
+  { id: "ready-stuck", label: "Ready but stuck", hint: "this change is ready, but its stack is not" },
   { id: "ready", label: "Ready", hint: "all known requirements satisfied" },
 ];
 
@@ -515,7 +516,7 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
       const difference = parseTime(left.updated) - parseTime(right.updated);
       if (sort === "freshest") return -difference;
       if (sort === "oldest") return difference;
-      return id === "ready" ? -difference : difference;
+      return id === "ready" || id === "ready-stuck" ? -difference : difference;
     }),
   ])) as Record<DashboardGroup, DashboardChange[]>, [sort, visible]);
   const queryWarning = data?.warnings.find((warning) => warning.source === "attention" || warning.source === "reviewing");

@@ -61,7 +61,7 @@ export type DashboardProfile = {
 };
 
 export type DashboardScope = "mine" | "reviewing";
-export type DashboardGroup = "action" | "unclear" | "waiting" | "ready";
+export type DashboardGroup = "action" | "unclear" | "waiting" | "ready-stuck" | "ready";
 export type DashboardEvidence = "explicit" | "derived" | "inferred" | "unknown";
 export type DashboardCiState = "failed" | "running" | "passed" | "unknown";
 

@@ -1816,6 +1816,12 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
           >
             <Columns2 size={13} /> Compare files
           </button>
+          {!movedCodeOpen && (
+            <div className="diff-layout-buttons" aria-label="Diff layout">
+              <button type="button" className={diffStyle === "split" ? "active" : ""} aria-pressed={diffStyle === "split"} onClick={() => { setDiffStyle("split"); saveProjectUiSettings(data.host, data.project, { diffStyle: "split" }); }}><Columns2 size={13} /> Side by side</button>
+              <button type="button" className={diffStyle === "unified" ? "active" : ""} aria-pressed={diffStyle === "unified"} onClick={() => { setDiffStyle("unified"); saveProjectUiSettings(data.host, data.project, { diffStyle: "unified" }); }}><Rows3 size={13} /> Unified</button>
+            </div>
+          )}
           <details className="view-settings">
             <summary title="Diff display settings">
               <Settings2 size={14} />

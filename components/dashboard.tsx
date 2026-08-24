@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { AlertTriangle, ChevronDown, ChevronRight, ExternalLink, LoaderCircle, RefreshCw, Settings2, Share2 } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronRight, ExternalLink, LoaderCircle, RefreshCw, Search, Settings2, Share2 } from "lucide-react";
 import { Logo, ThemeButton, UrlForm } from "@/components/app-chrome";
 import { normalizeGerritServer } from "@/lib/gerrit-url";
 import type { DashboardChange, DashboardData, DashboardGroup, DashboardOwnership, DashboardProfile, DashboardScope } from "@/lib/types";
@@ -12,7 +12,7 @@ type DashboardViewState = {
   workState: "all" | DashboardGroup;
   wipFilter: "all" | "wip" | "reviewable";
   project: string;
-  owner: string;
+  owners: string[];
   topic: string;
   sort: "priority" | "freshest" | "oldest";
   activityAgeFilter: number;
@@ -24,7 +24,7 @@ const DEFAULT_VIEW_STATE: DashboardViewState = {
   workState: "all",
   wipFilter: "all",
   project: "all",
-  owner: "all",
+  owners: [],
   topic: "all",
   sort: "priority",
   activityAgeFilter: 0,
@@ -41,7 +41,7 @@ function parseActivityAge(value: string | null, fallback: number) {
   return fallback;
 }
 
-function readUrlViewState(searchParams: Pick<URLSearchParams, "get">, fallback: DashboardViewState): DashboardViewState {
+function readUrlViewState(searchParams: Pick<URLSearchParams, "get" | "getAll">, fallback: DashboardViewState): DashboardViewState {
   const scope = searchParams.get("scope");
   const workState = searchParams.get("state");
   const wipFilter = searchParams.get("wip");
@@ -52,7 +52,7 @@ function readUrlViewState(searchParams: Pick<URLSearchParams, "get">, fallback: 
     workState: workState === "all" || GROUPS.some((group) => group.id === workState) ? workState as "all" | DashboardGroup : fallback.workState,
     wipFilter: wipFilter === "wip" || wipFilter === "reviewable" ? wipFilter : fallback.wipFilter,
     project: searchParams.get("project") ?? fallback.project,
-    owner: searchParams.get("owner") ?? fallback.owner,
+    owners: searchParams.getAll("owner").flatMap((value) => value.split(",")).filter((value) => value && value !== "all").filter((value, index, values) => values.indexOf(value) === index),
     topic: searchParams.get("topic") ?? fallback.topic,
     sort: sort === "freshest" || sort === "oldest" ? sort : fallback.sort,
     activityAgeFilter: parseActivityAge(searchParams.get("age"), fallback.activityAgeFilter),
@@ -70,7 +70,7 @@ function dashboardSearchParams(profile: DashboardProfile, state: DashboardViewSt
   params.set("state", state.workState);
   if (state.wipFilter !== "all") params.set("wip", state.wipFilter);
   if (state.project !== "all") params.set("project", state.project);
-  if (state.owner !== "all") params.set("owner", state.owner);
+  for (const owner of state.owners) params.append("owner", owner);
   if (state.topic !== "all") params.set("topic", state.topic);
   if (state.sort !== "priority") params.set("sort", state.sort);
   if (state.activityAgeFilter > 0) params.set("age", `inactive:${state.activityAgeFilter}`);
@@ -166,7 +166,7 @@ function saveViewState(profile: DashboardProfile, state: DashboardViewState) {
   window.sessionStorage.setItem(viewStateKey(profile), JSON.stringify({ scrollY: state.scrollY }));
 }
 
-const DASHBOARD_CACHE_VERSION = 5;
+const DASHBOARD_CACHE_VERSION = 6;
 const DASHBOARD_DATA_EVENT = "gerritdiff:dashboard-data-change";
 
 function dashboardDataKey(profile: DashboardProfile) {
@@ -230,14 +230,15 @@ function confidenceLabel(change: DashboardChange) {
   return "Not enough data for a confident conclusion";
 }
 
-function changeMatchesScope(change: DashboardChange, scope: "all" | DashboardScope) {
-  if (scope === "everything") return true;
+function changeMatchesScope(change: DashboardChange, scope: "all" | DashboardScope, ownerFilterActive = false) {
+  if (scope === "everything" || (scope === "all" && ownerFilterActive)) return true;
   if (scope === "all") return change.scopes.includes("mine") || change.scopes.includes("reviewing");
   return change.scopes.includes(scope);
 }
 
 function ChangeRow({
   change,
+  href,
   abandonSelected,
   identityAccountId,
   ownershipRevision,
@@ -245,6 +246,7 @@ function ChangeRow({
   onToggleAbandon,
 }: {
   change: DashboardChange;
+  href: string;
   abandonSelected: boolean;
   identityAccountId?: number;
   ownershipRevision: string;
@@ -291,17 +293,22 @@ function ChangeRow({
 
   return (
     <article className={`dashboard-change dashboard-change-${change.group} evidence-${change.evidence}${change.status === "WIP" ? " is-wip" : ""}`}>
-      <button className="dashboard-change-main" type="button" onClick={() => onOpen(change)}>
+      <a className="dashboard-change-main" href={href} onClick={(event) => {
+        if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+        event.preventDefault();
+        onOpen(change);
+      }}>
         <span className="dashboard-change-title">
           <strong>{change.subject}</strong>
-          <small>{change.project} #{change.changeNumber}{change.patchset ? ` · PS${change.patchset}` : ""} · {scope}{change.status === "WIP" && <b className="dashboard-wip-badge">WIP</b>}{change.topic ? ` · ${change.topic}` : ""}{change.scopes.includes("reviewing") ? ` · ${change.owner.name}` : ""}</small>
+          <small>{change.project} #{change.changeNumber}{change.patchset ? ` · PS${change.patchset}` : ""} · {scope}{change.status === "WIP" && <b className="dashboard-wip-badge">WIP</b>}{change.topic ? ` · ${change.topic}` : ""}</small>
         </span>
         <span className="dashboard-change-reason">
           <strong>{change.facts.join(" · ") || "Details pending"}</strong>
           <span>{change.evidence === "inferred" ? "Likely: " : ""}{change.diagnosis}</span>
         </span>
+        <span className="dashboard-change-owner"><small>Owner</small><strong>{change.owner.name}</strong></span>
         <time className={changeAge.days >= 7 ? "overdue" : changeAge.days >= 3 ? "stale" : ""} dateTime={change.updated} title={`Last updated ${new Date(changeAge.timestamp).toLocaleString()}`}>Updated {changeAge.label}</time>
-      </button>
+      </a>
       <button className="dashboard-change-expand" type="button" aria-expanded={expanded} aria-label={expanded ? "Collapse change details" : "Expand change details"} onClick={toggleDetails}>
         {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
       </button>
@@ -315,7 +322,11 @@ function ChangeRow({
           <div><span>Updated</span><strong>{new Date(parseTime(change.updated)).toLocaleString()}</strong></div>
           <div className="dashboard-change-detail-actions">
             {needsOwnerApproval && identityAccountId && !ownershipLoading && (ownershipError || !ownership || ownership.status === "unavailable") && <button type="button" onClick={loadOwnership}>Retry ownership check</button>}
-            <button type="button" onClick={() => onOpen(change)}>Open diff</button>
+            <a href={href} onClick={(event) => {
+              if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+              event.preventDefault();
+              onOpen(change);
+            }}>Open diff</a>
             <a href={change.sourceUrl} target="_blank" rel="noreferrer">Open in Gerrit <ExternalLink size={12} /></a>
             {change.scopes.includes("mine") && change.patchset && (
               <button type="button" className={abandonSelected ? "is-danger" : ""} onClick={() => onToggleAbandon(change)}>
@@ -350,6 +361,7 @@ function Group({
   abandonQueue,
   identityAccountId,
   ownershipRevision,
+  changeHref,
   onOpen,
   onToggleAbandon,
 }: {
@@ -359,6 +371,7 @@ function Group({
   abandonQueue: Record<string, string>;
   identityAccountId?: number;
   ownershipRevision: string;
+  changeHref(change: DashboardChange): string;
   onOpen(change: DashboardChange): void;
   onToggleAbandon(change: DashboardChange): void;
 }) {
@@ -370,12 +383,99 @@ function Group({
       </div>
       <div className="dashboard-group-list">
         {changes.length > 0 ? changes.map((change) => (
-          <ChangeRow key={change.id} change={change} abandonSelected={Object.hasOwn(abandonQueue, change.id)} identityAccountId={identityAccountId} ownershipRevision={ownershipRevision} onOpen={onOpen} onToggleAbandon={onToggleAbandon} />
+          <ChangeRow key={change.id} change={change} href={changeHref(change)} abandonSelected={Object.hasOwn(abandonQueue, change.id)} identityAccountId={identityAccountId} ownershipRevision={ownershipRevision} onOpen={onOpen} onToggleAbandon={onToggleAbandon} />
         )) : (
           <div className="dashboard-group-empty">No changes in this group.</div>
         )}
       </div>
     </section>
+  );
+}
+
+function OwnerMultiSelect({
+  options,
+  selected,
+  onChange,
+}: {
+  options: [string, string][];
+  selected: string[];
+  onChange(selected: string[]): void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const container = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function closeOnOutsideClick(event: PointerEvent) {
+      if (!container.current?.contains(event.target as Node)) {
+        setOpen(false);
+        setQuery("");
+      }
+    }
+    window.addEventListener("pointerdown", closeOnOutsideClick);
+    return () => window.removeEventListener("pointerdown", closeOnOutsideClick);
+  }, [open]);
+
+  const knownOwners = new Map(options);
+  const completeOptions: [string, string][] = [
+    ...selected.flatMap((value): [string, string][] => knownOwners.has(value) ? [] : [[value, value]]),
+    ...options,
+  ];
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const matchesQuery = ([value, label]: [string, string]) => !normalizedQuery
+    || label.toLocaleLowerCase().includes(normalizedQuery)
+    || value.toLocaleLowerCase().includes(normalizedQuery);
+  const selectedOptions = completeOptions.filter((option) => selected.includes(option[0]) && matchesQuery(option));
+  const remainingOptions = completeOptions.filter((option) => !selected.includes(option[0]) && matchesQuery(option));
+  const selectedLabels = completeOptions.flatMap(([value, label]) => selected.includes(value) ? [label] : []);
+  const buttonLabel = selected.length === 0
+    ? "All owners"
+    : selected.length === 1
+      ? selectedLabels[0] ?? selected[0]
+      : `${selected.length} owners`;
+
+  function toggleOwner(value: string) {
+    onChange(selected.includes(value)
+      ? selected.filter((owner) => owner !== value)
+      : [...selected, value]);
+  }
+
+  function ownerOption([value, label]: [string, string]) {
+    return (
+      <label key={value}>
+        <input type="checkbox" checked={selected.includes(value)} onChange={() => toggleOwner(value)} />
+        <span>{label}</span>
+      </label>
+    );
+  }
+
+  return (
+    <div className="dashboard-multiselect" ref={container}>
+      <button type="button" aria-haspopup="listbox" aria-expanded={open} onClick={() => {
+        if (open) setQuery("");
+        setOpen(!open);
+      }}>
+        <span>{buttonLabel}</span><ChevronDown size={13} />
+      </button>
+      {open && (
+        <div className="dashboard-multiselect-list" role="listbox" aria-label="Filter by change owners" aria-multiselectable="true">
+          <label className="dashboard-multiselect-search">
+            <Search size={13} />
+            <input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search owners" aria-label="Search change owners" />
+          </label>
+          {selected.length > 0 && (
+            <>
+              <div className="dashboard-multiselect-group"><span>Selected</span><button type="button" onClick={() => onChange([])}>Clear</button></div>
+              {selectedOptions.map(ownerOption)}
+            </>
+          )}
+          <div className="dashboard-multiselect-group"><span>{selected.length > 0 ? "Other owners" : "Owners"}</span></div>
+          {remainingOptions.map(ownerOption)}
+          {selectedOptions.length === 0 && remainingOptions.length === 0 && <small>No matching owners.</small>}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -391,7 +491,7 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
   const cachedData = useMemo(() => parseDashboardDataSnapshot(cachedSnapshot), [cachedSnapshot]);
   const dataRef = useRef<DashboardData | null>(null);
   const [liveData, setLiveData] = useState<DashboardData | null>(null);
-  const data = liveData ?? cachedData;
+  const fetchedData = liveData ?? cachedData;
   const [error, setError] = useState("");
   const [refreshError, setRefreshError] = useState("");
   const [isRefreshing, setIsRefreshing] = useState(true);
@@ -399,9 +499,10 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
   const [scope, setScope] = useState<"all" | DashboardScope>(initialViewState.scope);
   const [workState, setWorkState] = useState<"all" | DashboardGroup>(initialViewState.workState);
   const mergedView = workState === "merged";
+  const data = fetchedData && Boolean(fetchedData.mergedLoaded) === mergedView ? fetchedData : null;
   const [wipFilter, setWipFilter] = useState<"all" | "wip" | "reviewable">(initialViewState.wipFilter);
   const [project, setProject] = useState(initialViewState.project);
-  const [owner, setOwner] = useState(initialViewState.owner);
+  const [selectedOwners, setSelectedOwners] = useState(initialViewState.owners);
   const [topic, setTopic] = useState(initialViewState.topic);
   const [sort, setSort] = useState<"priority" | "freshest" | "oldest">(initialViewState.sort);
   const [activityAgeFilter, setActivityAgeFilter] = useState(initialViewState.activityAgeFilter);
@@ -412,12 +513,12 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
   const [shareCopied, setShareCopied] = useState<"exact" | "filters" | null>(null);
 
   useEffect(() => {
-    const state = { scope, workState, wipFilter, project, owner, topic, sort, activityAgeFilter, scrollY: window.scrollY };
+    const state = { scope, workState, wipFilter, project, owners: selectedOwners, topic, sort, activityAgeFilter, scrollY: window.scrollY };
     saveViewState(profile, state);
     const canonical = dashboardSearchParams(profile, state, profile.accountId);
     const target = `/dashboard?${canonical}`;
     if (pathname !== "/dashboard" || searchParams.toString() !== canonical.toString()) router.replace(target, { scroll: false });
-  }, [activityAgeFilter, owner, pathname, profile, project, router, scope, searchParams, sort, topic, wipFilter, workState]);
+  }, [activityAgeFilter, pathname, profile, project, router, scope, searchParams, selectedOwners, sort, topic, wipFilter, workState]);
 
   useEffect(() => {
     if (!data || initialScrollY <= 0) return;
@@ -427,13 +528,15 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
 
   useEffect(() => {
     const controller = new AbortController();
+    setIsRefreshing(true);
     const requestProfile = { server: profileServer, username: profileUsername, accountId: profileAccountId };
     const identityQuery = profileAccountId === undefined ? "" : `&account=${profileAccountId}`;
     const scopeQuery = scope === "everything" ? "&scope=everything" : "";
     const stateQuery = mergedView ? "&state=merged" : "";
+    const ownerQuery = selectedOwners.map((owner) => `&owner=${encodeURIComponent(owner)}`).join("");
     const freshQuery = refresh > 0 ? `&fresh=${refresh}` : "";
     // Keep this request version paired with DASHBOARD_CACHE_VERSION so API shape changes also invalidate session data.
-    fetch(`/api/dashboard?v=${DASHBOARD_CACHE_VERSION}&server=${encodeURIComponent(profileServer)}&username=${encodeURIComponent(profileUsername)}${identityQuery}${scopeQuery}${stateQuery}${freshQuery}`, {
+    fetch(`/api/dashboard?v=${DASHBOARD_CACHE_VERSION}&server=${encodeURIComponent(profileServer)}&username=${encodeURIComponent(profileUsername)}${identityQuery}${scopeQuery}${stateQuery}${ownerQuery}${freshQuery}`, {
       signal: controller.signal,
       cache: refresh > 0 ? "no-store" : "default",
     })
@@ -445,7 +548,7 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
       .then((nextData) => {
         dataRef.current = nextData;
         setLiveData(nextData);
-        saveDashboardData(requestProfile, nextData);
+        if (selectedOwners.length === 0) saveDashboardData(requestProfile, nextData);
         setError("");
         setRefreshError("");
         setIsRefreshing(false);
@@ -457,18 +560,22 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
         setIsRefreshing(false);
       });
     return () => controller.abort();
-  }, [mergedView, profileAccountId, profileServer, profileUsername, refresh, scope]);
+  }, [mergedView, profileAccountId, profileServer, profileUsername, refresh, scope, selectedOwners]);
 
   function currentViewState(): DashboardViewState {
-    return { scope, workState, wipFilter, project, owner, topic, sort, activityAgeFilter, scrollY: window.scrollY };
+    return { scope, workState, wipFilter, project, owners: selectedOwners, topic, sort, activityAgeFilter, scrollY: window.scrollY };
+  }
+
+  function changeHref(change: DashboardChange) {
+    const state = { scope, workState, wipFilter, project, owners: selectedOwners, topic, sort, activityAgeFilter, scrollY: 0 };
+    const returnTo = `/dashboard?${dashboardSearchParams(profile, state, data?.identity.accountId ?? profile.accountId)}`;
+    return `/?${new URLSearchParams({ url: change.sourceUrl, return: returnTo })}`;
   }
 
   function openChange(change: DashboardChange) {
     const state = currentViewState();
     saveViewState(profile, state);
-    const returnTo = `/dashboard?${dashboardSearchParams(profile, state, data?.identity.accountId ?? profile.accountId)}`;
-    const query = new URLSearchParams({ url: change.sourceUrl, return: returnTo });
-    router.push(`/?${query}`);
+    router.push(changeHref(change));
   }
 
   async function copyDashboardLink(kind: "exact" | "filters") {
@@ -509,13 +616,17 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
     if (activityAgeFilter < 0) return days <= Math.abs(activityAgeFilter);
     return true;
   }), [activityAgeFilter, data, project]);
-  const owners = useMemo(() => [...new Map(projectFiltered.map((change) => [change.owner.username ?? change.owner.name, change.owner.name])).entries()]
+  const ownerOptions = useMemo(() => [...new Map(projectFiltered.map((change) => [change.owner.username ?? change.owner.name, change.owner.name])).entries()]
     .toSorted((left, right) => left[1].localeCompare(right[1])), [projectFiltered]);
-  const ownerFiltered = useMemo(() => projectFiltered.filter((change) => owner === "all" || (change.owner.username ?? change.owner.name) === owner), [owner, projectFiltered]);
-  const topicOptionsSource = useMemo(() => ownerFiltered.filter((change) => changeMatchesScope(change, scope)), [ownerFiltered, scope]);
+  const selectedOwnerSet = useMemo(() => new Set(selectedOwners), [selectedOwners]);
+  const ownerFiltered = useMemo(() => projectFiltered.filter((change) => (
+    selectedOwnerSet.size === 0 || selectedOwnerSet.has(change.owner.username ?? change.owner.name)
+  )), [projectFiltered, selectedOwnerSet]);
+  const ownerFilterActive = selectedOwnerSet.size > 0;
+  const topicOptionsSource = useMemo(() => ownerFiltered.filter((change) => changeMatchesScope(change, scope, ownerFilterActive)), [ownerFilterActive, ownerFiltered, scope]);
   const topics = useMemo(() => [...new Set(topicOptionsSource.flatMap((change) => change.topic ? [change.topic] : []))].sort(), [topicOptionsSource]);
   const topicFiltered = useMemo(() => ownerFiltered.filter((change) => topic === "all" || change.topic === topic), [ownerFiltered, topic]);
-  const scopedForWipCounts = useMemo(() => topicFiltered.filter((change) => changeMatchesScope(change, scope)), [scope, topicFiltered]);
+  const scopedForWipCounts = useMemo(() => topicFiltered.filter((change) => changeMatchesScope(change, scope, ownerFilterActive)), [ownerFilterActive, scope, topicFiltered]);
   const wipCounts = {
     all: scopedForWipCounts.length,
     wip: scopedForWipCounts.filter((change) => change.status === "WIP").length,
@@ -525,12 +636,12 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
     wipFilter === "all" || (wipFilter === "wip" ? change.status === "WIP" : change.status !== "WIP")
   )), [topicFiltered, wipFilter]);
   const counts = {
-    all: wipFiltered.filter((change) => change.scopes.includes("mine") || change.scopes.includes("reviewing")).length,
+    all: ownerFilterActive ? wipFiltered.length : wipFiltered.filter((change) => change.scopes.includes("mine") || change.scopes.includes("reviewing")).length,
     mine: wipFiltered.filter((change) => change.scopes.includes("mine")).length,
     reviewing: wipFiltered.filter((change) => change.scopes.includes("reviewing")).length,
     everything: wipFiltered.length,
   };
-  const scoped = useMemo(() => wipFiltered.filter((change) => changeMatchesScope(change, scope)), [scope, wipFiltered]);
+  const scoped = useMemo(() => wipFiltered.filter((change) => changeMatchesScope(change, scope, ownerFilterActive)), [ownerFilterActive, scope, wipFiltered]);
   const stateCounts = Object.fromEntries(GROUPS.map(({ id }) => [id, scoped.filter((change) => change.group === id).length])) as Record<DashboardGroup, number>;
   const visible = useMemo(() => scoped.filter((change) => workState === "all" || change.group === workState), [scoped, workState]);
   const grouped = useMemo(() => Object.fromEntries(GROUPS.map(({ id }) => [
@@ -545,6 +656,14 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
   const queryWarning = data?.warnings.find((warning) => warning.source === "attention" || warning.source === "reviewing");
   const abandonChanges = (data?.changes ?? []).filter((change) => Object.hasOwn(abandonQueue, change.id));
   const generatedAbandonCommand = abandonmentCommand(abandonChanges, abandonQueue, profile.username, sshHost, sshPort);
+  const activeGroup = GROUPS.find((group) => group.id === workState);
+  const headingCount = activeGroup ? grouped[activeGroup.id].length : visible.length;
+  const allStatesCount: number | "?" = data && !data.mergedLoaded ? scoped.length : "?";
+  const workStateCount = (group: DashboardGroup): number | "?" => {
+    if (!data) return "?";
+    if (group === "merged") return data.mergedLoaded ? stateCounts.merged : "?";
+    return data.mergedLoaded ? "?" : stateCounts[group];
+  };
 
   async function copyAbandonmentCommand() {
     try {
@@ -578,10 +697,10 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
           </section>
           <section>
             <h2>Work state</h2>
-            <button type="button" className={workState === "all" ? "active" : ""} onClick={() => setWorkState("all")}><span>All states</span><b>{scoped.length}</b></button>
+            <button type="button" className={workState === "all" ? "active" : ""} onClick={() => setWorkState("all")}><span>All states</span><b title={allStatesCount === "?" ? "Not fetched for the current view" : undefined}>{allStatesCount}</b></button>
             {GROUPS.map((group) => (
               <button key={group.id} type="button" className={workState === group.id ? "active" : ""} onClick={() => setWorkState(group.id)}>
-                <span>{group.label.replace(" · you decide", "")}</span><b>{stateCounts[group.id]}</b>
+                <span>{group.label.replace(" · you decide", "")}</span><b title={workStateCount(group.id) === "?" ? "Not fetched for the current view" : undefined}>{workStateCount(group.id)}</b>
               </button>
             ))}
           </section>
@@ -597,7 +716,10 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
         </aside>
         <div className="dashboard-shell">
         <div className="dashboard-heading">
-          <div><h1>My work</h1><p>{stateCounts.action} need action · {stateCounts.unclear} need triage · public changes only</p></div>
+          <div>
+            <h1>{activeGroup ? activeGroup.label.replace(" · you decide", "") : "My work"}</h1>
+            <p>{headingCount} change{headingCount === 1 ? "" : "s"} in view · {activeGroup?.hint ?? "all open work states"} · public changes only</p>
+          </div>
           <div className="dashboard-heading-actions">
             <button type="button" onClick={() => copyDashboardLink("exact")}><Share2 size={13} /> {shareCopied === "exact" ? "Copied exact view" : "Share exact view"}</button>
             <button type="button" onClick={() => copyDashboardLink("filters")}><Share2 size={13} /> {shareCopied === "filters" ? "Copied filter view" : "Share filters"}</button>
@@ -613,10 +735,7 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
             <option value="all">All projects</option>
             {projects.map((value) => <option key={value} value={value}>{value}</option>)}
           </select>
-          <select aria-label="Filter by change owner" value={owner} onChange={(event) => { setOwner(event.target.value); setTopic("all"); }}>
-            <option value="all">All owners</option>
-            {owners.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-          </select>
+          <OwnerMultiSelect options={ownerOptions} selected={selectedOwners} onChange={(selected) => { setSelectedOwners(selected); setTopic("all"); }} />
           <select aria-label="Filter by topic" value={topic} onChange={(event) => setTopic(event.target.value)}>
             <option value="all">All topics</option>
             {topics.map((value) => <option key={value} value={value}>{value}</option>)}
@@ -710,6 +829,7 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
                 abandonQueue={abandonQueue}
                 identityAccountId={data?.identity.accountId ?? profile.accountId}
                 ownershipRevision={data?.fetchedAt ?? ""}
+                changeHref={changeHref}
                 onOpen={openChange}
                 onToggleAbandon={toggleAbandon}
               />

@@ -116,6 +116,8 @@ export type DashboardData = {
   };
   changes: DashboardChange[];
   warnings: DashboardWarning[];
+  /** Whether this response queried submitted changes instead of open changes. */
+  mergedLoaded?: boolean;
 };
 
 export type ChangeData = {

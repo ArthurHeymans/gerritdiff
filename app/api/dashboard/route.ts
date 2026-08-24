@@ -56,9 +56,15 @@ type QueryResult = {
   warning?: string;
 };
 
+type QuerySource = "mine" | "reviewing" | "attention" | "everything" | "owner-filter";
+
 const QUERY_OPTIONS = ["DETAILED_LABELS", "DETAILED_ACCOUNTS", "CURRENT_REVISION", "SUBMITTABLE", "SUBMIT_REQUIREMENTS"];
 const FALLBACK_QUERY_OPTIONS = ["DETAILED_LABELS", "DETAILED_ACCOUNTS", "CURRENT_REVISION"];
 const MAX_CHANGES_PER_QUERY = 300;
+
+function gerritQueryValue(value: string) {
+  return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+}
 
 function endpoint(server: URL, path: string) {
   return new URL(path.replace(/^\/+/, ""), server);
@@ -353,6 +359,10 @@ export async function GET(request: NextRequest) {
   const fresh = request.nextUrl.searchParams.has("fresh");
   const includeEverything = request.nextUrl.searchParams.get("scope") === "everything";
   const includeMerged = request.nextUrl.searchParams.get("state") === "merged";
+  const ownerFilters = [...new Set(request.nextUrl.searchParams.getAll("owner")
+    .flatMap((value) => value.split(","))
+    .map((value) => value.trim())
+    .filter((value) => value && value !== "all"))].slice(0, 20);
   const accountId = accountInput && /^\d+$/.test(accountInput) ? Number(accountInput) : undefined;
   const username = request.nextUrl.searchParams.get("username")?.trim() ?? accountInput;
   if (!serverInput || !username) {
@@ -369,12 +379,15 @@ export async function GET(request: NextRequest) {
       ? resolveIdentity(server, username)
       : accountIdentity(server, username, accountId);
     const statusQuery = includeMerged ? "status:merged" : "status:open";
-    const queries = await Promise.allSettled([
-      queryChanges(server, `owner:${identityQuery} ${statusQuery}`),
-      queryChanges(server, `reviewer:${identityQuery} ${statusQuery}`),
-      queryChanges(server, `attention:${identityQuery} ${statusQuery}`),
-      ...(includeEverything ? [queryChanges(server, statusQuery)] : []),
-    ]);
+    const ownerQuery = ownerFilters.map((owner) => `owner:${gerritQueryValue(owner)}`).join(" OR ");
+    const querySpecs: { source: QuerySource; query: string }[] = [
+      { source: "mine", query: `owner:${identityQuery} ${statusQuery}` },
+      { source: "reviewing", query: `reviewer:${identityQuery} ${statusQuery}` },
+      { source: "attention", query: `attention:${identityQuery} ${statusQuery}` },
+      ...(includeEverything && ownerFilters.length === 0 ? [{ source: "everything" as const, query: statusQuery }] : []),
+      ...(ownerQuery ? [{ source: "owner-filter" as const, query: `(${ownerQuery}) ${statusQuery}` }] : []),
+    ];
+    const queries = await Promise.allSettled(querySpecs.map(({ query }) => queryChanges(server, query)));
     if (queries.every((result) => result.status === "rejected")) {
       const first = queries[0];
       throw new Error(first.status === "rejected" && first.reason instanceof Error ? first.reason.message : "The Gerrit server could not be queried.");
@@ -395,19 +408,18 @@ export async function GET(request: NextRequest) {
 
     const scopesById = new Map<string, Set<DashboardScope>>();
     const changesById = new Map<string, GerritChange>();
-    const sources: ("mine" | "reviewing" | "attention" | "everything")[] = ["mine", "reviewing", "attention", "everything"];
-    const sourceLabel = { mine: "Owned changes", reviewing: "Incoming reviews", attention: "Attention", everything: "All changes" };
+    const sourceLabel: Record<QuerySource, string> = { mine: "Owned changes", reviewing: "Incoming reviews", attention: "Attention", everything: "All changes", "owner-filter": "Selected owners" };
     queries.forEach((result, index) => {
-      const source = sources[index];
+      const source = querySpecs[index].source;
       if (result.status === "rejected") {
-        warnings.push({ source, message: `${sourceLabel[source]} unavailable: ${result.reason instanceof Error ? result.reason.message : "query failed"}` });
+        warnings.push({ source: source === "owner-filter" ? "everything" : source, message: `${sourceLabel[source]} unavailable: ${result.reason instanceof Error ? result.reason.message : "query failed"}` });
         return;
       }
-      if (result.value.warning) warnings.push({ source: source === "attention" ? "attention" : source, message: result.value.warning });
+      if (result.value.warning) warnings.push({ source: source === "owner-filter" ? "everything" : source, message: result.value.warning });
       for (const change of result.value.changes) {
         changesById.set(change.id, change);
         const scopes = scopesById.get(change.id) ?? new Set<DashboardScope>();
-        scopes.add(source === "mine" ? "mine" : source === "everything" ? "everything" : "reviewing");
+        scopes.add(source === "mine" ? "mine" : source === "everything" || source === "owner-filter" ? "everything" : "reviewing");
         scopesById.set(change.id, scopes);
       }
     });
@@ -438,6 +450,7 @@ export async function GET(request: NextRequest) {
       identity,
       changes,
       warnings,
+      mergedLoaded: includeMerged,
     };
     return NextResponse.json(data, {
       headers: { "Cache-Control": fresh ? "no-store" : "public, s-maxage=60, stale-while-revalidate=300" },

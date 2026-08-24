@@ -124,7 +124,11 @@ function Viewer({ data, initialThreadId, loading, returnTo }: { data: ChangeData
         <HomeLink />
         <UrlForm initial={data.sourceUrl} compact />
         <div className="topbar-actions">
-          {returnTo && <button type="button" className="source-link dashboard-return" onClick={() => router.push(returnTo)}><LayoutDashboard size={14} /> Dashboard</button>}
+          {returnTo && <a className="source-link dashboard-return" href={returnTo} onClick={(event) => {
+            if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+            event.preventDefault();
+            router.push(returnTo);
+          }}><LayoutDashboard size={14} /> Dashboard</a>}
           <a className="source-link" href={data.sourceUrl} target="_blank" rel="noreferrer">Gerrit <ExternalLink size={14} /></a>
           <ThemeButton />
         </div>

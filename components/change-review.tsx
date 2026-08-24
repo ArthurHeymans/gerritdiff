@@ -99,6 +99,24 @@ type ProjectUiSettings = {
   sidebarMode?: "changed" | "repository" | "discussion";
 };
 
+const REVIEWERS_EXPANDED_STORAGE_KEY = "gerritdiff:reviewers-expanded";
+
+function readReviewersExpanded() {
+  try {
+    return window.localStorage.getItem(REVIEWERS_EXPANDED_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function saveReviewersExpanded(expanded: boolean) {
+  try {
+    window.localStorage.setItem(REVIEWERS_EXPANDED_STORAGE_KEY, String(expanded));
+  } catch {
+    // Keep the in-memory preference when browser storage is unavailable.
+  }
+}
+
 function projectUiStorageKey(host: string, project: string) {
   return `gerritdiff:ui:${host}:${project}`;
 }
@@ -760,7 +778,7 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
   const [tabSize, setTabSize] = useState(2);
   const [sidebarMode, setSidebarMode] = useState<"changed" | "repository" | "discussion">("changed");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [reviewersExpanded, setReviewersExpanded] = useState((data.reviewers?.length ?? 0) <= 6);
+  const [reviewersExpanded, setReviewersExpanded] = useState(false);
   const [knownPath, setKnownPath] = useState("");
   const [repositoryError, setRepositoryError] = useState("");
   const [loadingItems, setLoadingItems] = useState<ReadonlySet<string>>(() => new Set());
@@ -911,12 +929,23 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
       setShowWhitespace(settings.showWhitespace ?? false);
       setIgnoreIndentation(settings.ignoreIndentation ?? true);
       setSidebarCollapsed(settings.sidebarCollapsed ?? false);
+      setReviewersExpanded(readReviewersExpanded());
       if (settings.sidebarMode === "repository" || settings.sidebarMode === "discussion") setSidebarMode(settings.sidebarMode);
       else setSidebarMode("changed");
       setRightPanel(null);
     });
     return () => cancelAnimationFrame(frame);
   }, [data.host, data.project]);
+
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      const container = codeViewContainerRef.current;
+      if (!container) return;
+      container.tabIndex = -1;
+      container.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [data.baseRevisionNumber, data.revision]);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia("(max-width: 767px)");
@@ -1724,7 +1753,11 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
             )}
           </div>
           <div className={`reviewers-summary${reviewersExpanded ? " is-expanded" : ""}`} aria-label="Current reviewers and votes">
-            <button type="button" className="reviewers-toggle" aria-expanded={reviewersExpanded} onClick={() => setReviewersExpanded((current) => !current)}>
+            <button type="button" className="reviewers-toggle" aria-expanded={reviewersExpanded} onClick={() => setReviewersExpanded((current) => {
+              const next = !current;
+              saveReviewersExpanded(next);
+              return next;
+            })}>
               <span className="reviewers-label">Reviewers</span>
               <b>{reviewers.length}</b>
               <ChevronDown size={12} />

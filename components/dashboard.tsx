@@ -431,8 +431,12 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
     const identityQuery = profileAccountId === undefined ? "" : `&account=${profileAccountId}`;
     const scopeQuery = scope === "everything" ? "&scope=everything" : "";
     const stateQuery = mergedView ? "&state=merged" : "";
+    const freshQuery = refresh > 0 ? `&fresh=${refresh}` : "";
     // Keep this request version paired with DASHBOARD_CACHE_VERSION so API shape changes also invalidate session data.
-    fetch(`/api/dashboard?v=${DASHBOARD_CACHE_VERSION}&server=${encodeURIComponent(profileServer)}&username=${encodeURIComponent(profileUsername)}${identityQuery}${scopeQuery}${stateQuery}`, { signal: controller.signal })
+    fetch(`/api/dashboard?v=${DASHBOARD_CACHE_VERSION}&server=${encodeURIComponent(profileServer)}&username=${encodeURIComponent(profileUsername)}${identityQuery}${scopeQuery}${stateQuery}${freshQuery}`, {
+      signal: controller.signal,
+      cache: refresh > 0 ? "no-store" : "default",
+    })
       .then(async (response) => {
         const body = await response.json();
         if (!response.ok) throw new Error(body.error ?? "The dashboard could not be loaded.");

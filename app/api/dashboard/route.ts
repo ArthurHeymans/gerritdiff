@@ -350,6 +350,7 @@ function classify({
 export async function GET(request: NextRequest) {
   const serverInput = request.nextUrl.searchParams.get("server")?.trim();
   const accountInput = request.nextUrl.searchParams.get("account")?.trim();
+  const fresh = request.nextUrl.searchParams.has("fresh");
   const includeEverything = request.nextUrl.searchParams.get("scope") === "everything";
   const includeMerged = request.nextUrl.searchParams.get("state") === "merged";
   const accountId = accountInput && /^\d+$/.test(accountInput) ? Number(accountInput) : undefined;
@@ -439,7 +440,7 @@ export async function GET(request: NextRequest) {
       warnings,
     };
     return NextResponse.json(data, {
-      headers: { "Cache-Control": "public, s-maxage=60, stale-while-revalidate=300" },
+      headers: { "Cache-Control": fresh ? "no-store" : "public, s-maxage=60, stale-while-revalidate=300" },
     });
   } catch (reason) {
     return NextResponse.json({ error: reason instanceof Error ? reason.message : "The dashboard could not be loaded." }, { status: 400 });

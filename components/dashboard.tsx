@@ -80,6 +80,7 @@ const GROUPS: { id: DashboardGroup; label: string; hint: string }[] = [
   { id: "waiting", label: "Waiting on others", hint: "surface stale waits as nudges" },
   { id: "ready-stuck", label: "Ready but stuck", hint: "this change is ready, but its stack is not" },
   { id: "ready", label: "Ready", hint: "all known requirements satisfied" },
+  { id: "merged", label: "Merged", hint: "submitted changes, newest first" },
 ];
 
 export function DashboardProfileForm({ onSave }: { onSave(profile: DashboardProfile): void }) {
@@ -161,7 +162,7 @@ function saveViewState(profile: DashboardProfile, state: DashboardViewState) {
   window.sessionStorage.setItem(viewStateKey(profile), JSON.stringify({ scrollY: state.scrollY }));
 }
 
-const DASHBOARD_CACHE_VERSION = 4;
+const DASHBOARD_CACHE_VERSION = 5;
 const DASHBOARD_DATA_EVENT = "gerritdiff:dashboard-data-change";
 
 function dashboardDataKey(profile: DashboardProfile) {
@@ -393,6 +394,7 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
   const [refresh, setRefresh] = useState(0);
   const [scope, setScope] = useState<"all" | DashboardScope>(initialViewState.scope);
   const [workState, setWorkState] = useState<"all" | DashboardGroup>(initialViewState.workState);
+  const mergedView = workState === "merged";
   const [wipFilter, setWipFilter] = useState<"all" | "wip" | "reviewable">(initialViewState.wipFilter);
   const [project, setProject] = useState(initialViewState.project);
   const [topic, setTopic] = useState(initialViewState.topic);
@@ -423,8 +425,9 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
     const requestProfile = { server: profileServer, username: profileUsername, accountId: profileAccountId };
     const identityQuery = profileAccountId === undefined ? "" : `&account=${profileAccountId}`;
     const scopeQuery = scope === "everything" ? "&scope=everything" : "";
+    const stateQuery = mergedView ? "&state=merged" : "";
     // Keep this request version paired with DASHBOARD_CACHE_VERSION so API shape changes also invalidate session data.
-    fetch(`/api/dashboard?v=${DASHBOARD_CACHE_VERSION}&server=${encodeURIComponent(profileServer)}&username=${encodeURIComponent(profileUsername)}${identityQuery}${scopeQuery}`, { signal: controller.signal })
+    fetch(`/api/dashboard?v=${DASHBOARD_CACHE_VERSION}&server=${encodeURIComponent(profileServer)}&username=${encodeURIComponent(profileUsername)}${identityQuery}${scopeQuery}${stateQuery}`, { signal: controller.signal })
       .then(async (response) => {
         const body = await response.json();
         if (!response.ok) throw new Error(body.error ?? "The dashboard could not be loaded.");
@@ -445,7 +448,7 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
         setIsRefreshing(false);
       });
     return () => controller.abort();
-  }, [profileAccountId, profileServer, profileUsername, refresh, scope]);
+  }, [mergedView, profileAccountId, profileServer, profileUsername, refresh, scope]);
 
   function currentViewState(): DashboardViewState {
     return { scope, workState, wipFilter, project, topic, sort, activityAgeFilter, scrollY: window.scrollY };
@@ -524,7 +527,7 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
       const difference = parseTime(left.updated) - parseTime(right.updated);
       if (sort === "freshest") return -difference;
       if (sort === "oldest") return difference;
-      return id === "ready" || id === "ready-stuck" ? -difference : difference;
+      return id === "ready" || id === "ready-stuck" || id === "merged" ? -difference : difference;
     }),
   ])) as Record<DashboardGroup, DashboardChange[]>, [sort, visible]);
   const queryWarning = data?.warnings.find((warning) => warning.source === "attention" || warning.source === "reviewing");

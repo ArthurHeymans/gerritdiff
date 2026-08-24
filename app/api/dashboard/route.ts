@@ -311,11 +311,13 @@ function classify({
     ...(unresolved ? [`${unresolved} unresolved`] : []),
     ...(stackBlockers ? [`${stackBlockers} blocked stack change${stackBlockers === 1 ? "" : "s"}`] : []),
   ])];
-  const classification = scopes.includes("mine")
-    ? classifyOwnedChange({ change, ci, negative, unresolved, conflict, stackBlockers })
-    : scopes.includes("reviewing")
-      ? classifyReviewingChange(change, labels, identity, attentionAvailable)
-      : classifyUnrelatedChange(change);
+  const classification: Classification = change.status === "MERGED"
+    ? { group: "merged", evidence: "explicit", diagnosis: "Submitted in Gerrit" }
+    : scopes.includes("mine")
+      ? classifyOwnedChange({ change, ci, negative, unresolved, conflict, stackBlockers })
+      : scopes.includes("reviewing")
+        ? classifyReviewingChange(change, labels, identity, attentionAvailable)
+        : classifyUnrelatedChange(change);
 
   return {
     id: change.id,
@@ -349,6 +351,7 @@ export async function GET(request: NextRequest) {
   const serverInput = request.nextUrl.searchParams.get("server")?.trim();
   const accountInput = request.nextUrl.searchParams.get("account")?.trim();
   const includeEverything = request.nextUrl.searchParams.get("scope") === "everything";
+  const includeMerged = request.nextUrl.searchParams.get("state") === "merged";
   const accountId = accountInput && /^\d+$/.test(accountInput) ? Number(accountInput) : undefined;
   const username = request.nextUrl.searchParams.get("username")?.trim() ?? accountInput;
   if (!serverInput || !username) {
@@ -364,11 +367,12 @@ export async function GET(request: NextRequest) {
     const identityPromise = accountId === undefined
       ? resolveIdentity(server, username)
       : accountIdentity(server, username, accountId);
+    const statusQuery = includeMerged ? "status:merged" : "status:open";
     const queries = await Promise.allSettled([
-      queryChanges(server, `owner:${identityQuery} status:open`),
-      queryChanges(server, `reviewer:${identityQuery} status:open`),
-      queryChanges(server, `attention:${identityQuery} status:open`),
-      ...(includeEverything ? [queryChanges(server, "status:open")] : []),
+      queryChanges(server, `owner:${identityQuery} ${statusQuery}`),
+      queryChanges(server, `reviewer:${identityQuery} ${statusQuery}`),
+      queryChanges(server, `attention:${identityQuery} ${statusQuery}`),
+      ...(includeEverything ? [queryChanges(server, statusQuery)] : []),
     ]);
     if (queries.every((result) => result.status === "rejected")) {
       const first = queries[0];

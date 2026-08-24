@@ -26,6 +26,8 @@ type GerritDetail = {
   project: string;
   branch: string;
   status: string;
+  mergeable?: boolean;
+  work_in_progress?: boolean;
   owner: GerritAccount;
   reviewers?: Record<string, GerritAccount[]>;
   labels?: Record<string, { all?: GerritAccount[] }>;

@@ -1658,7 +1658,7 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
         <div className="change-header">
           <div className="change-title-row">
             <div className="change-kicker">
-              <span className={`change-status ${data.status.toLowerCase()}`}>{data.status}</span>
+              <span className={`change-status ${data.status.toLowerCase().replaceAll(" ", "-")}`}>{data.status}</span>
               <span>{data.project}</span><span>/</span><span>change {data.changeNumber}</span>
             </div>
             <h1 title={data.subject}>{data.subject}</h1>

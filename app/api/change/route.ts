@@ -156,6 +156,13 @@ function normalizeComments(input: GerritComments, origin: string, ported = false
   }));
 }
 
+function changeStatus(status: string, workInProgress?: boolean, mergeable?: boolean) {
+  if (status === "NEW" && workInProgress) return "WIP";
+  if (status === "NEW" && mergeable === false) return "Merge conflict";
+  if (status === "NEW") return "Active";
+  return status.toLowerCase().replace(/^./, (character) => character.toUpperCase());
+}
+
 export async function GET(request: NextRequest) {
   try {
     const sourceUrl = request.nextUrl.searchParams.get("url");
@@ -303,7 +310,7 @@ export async function GET(request: NextRequest) {
       baseCommitMessageLineOffset,
       project: detail.project,
       branch: detail.branch,
-      status: detail.status,
+      status: changeStatus(detail.status, detail.work_in_progress, detail.mergeable),
       owner: {
         name: detail.owner.display_name ?? detail.owner.name ?? "Unknown author",
         email: detail.owner.email,

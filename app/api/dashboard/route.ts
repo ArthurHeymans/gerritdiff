@@ -12,6 +12,7 @@ import type {
 type GerritAccount = {
   _account_id?: number;
   name?: string;
+  email?: string;
   username?: string;
   avatars?: { url: string; height: number }[];
 };
@@ -337,7 +338,8 @@ function classify({
     updated: change.updated,
     patchset: currentPatchset(change),
     owner: {
-      name: change.owner.name ?? change.owner.username ?? "Hidden or deleted account",
+      name: change.owner.name ?? change.owner.username ?? change.owner.email ?? "Hidden or deleted account",
+      email: change.owner.email,
       username: change.owner.username,
       avatarUrl: change.owner.avatars?.at(-1)?.url,
     },

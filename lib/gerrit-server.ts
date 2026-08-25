@@ -16,6 +16,7 @@ type GerritAccount = {
   name?: string;
   display_name?: string;
   email?: string;
+  username?: string;
   avatars?: Array<{ url: string; height: number }>;
   value?: number;
 };
@@ -129,7 +130,7 @@ export async function publicFetch(url: string, accept = "application/json", allo
 
 export async function resolveChange(sourceUrl: string) {
   const parsed = parseGerritUrl(sourceUrl);
-  const detailUrl = `${parsed.origin}/changes/${encodeURIComponent(parsed.change)}/detail?o=ALL_REVISIONS&o=ALL_COMMITS&o=DETAILED_LABELS&o=MESSAGES`;
+  const detailUrl = `${parsed.origin}/changes/${encodeURIComponent(parsed.change)}/detail?o=ALL_REVISIONS&o=ALL_COMMITS&o=DETAILED_LABELS&o=DETAILED_ACCOUNTS&o=MESSAGES`;
   const detailResponse = await publicFetch(detailUrl);
   if (!detailResponse) throw new Error("Change not found.");
   const detail = parseGerritJson<GerritDetail>(await detailResponse.text());

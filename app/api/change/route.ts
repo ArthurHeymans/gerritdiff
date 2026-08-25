@@ -288,8 +288,9 @@ export async function GET(request: NextRequest) {
       const avatar = account.avatars?.toSorted((a, b) => b.height - a.height)[0]?.url;
       const key = accountKey(account);
       return {
-        name: account.display_name ?? account.name ?? account.email ?? "Unknown reviewer",
+        name: account.display_name ?? account.name ?? account.email ?? account.username ?? "Unknown reviewer",
         email: account.email,
+        username: account.username,
         avatarUrl: avatar ? new URL(avatar, parsed.origin).toString() : undefined,
         codeReview: codeReviewVotes.get(key),
         verified: verifiedVotes.get(key),
@@ -312,8 +313,9 @@ export async function GET(request: NextRequest) {
       branch: detail.branch,
       status: changeStatus(detail.status, detail.work_in_progress, detail.mergeable),
       owner: {
-        name: detail.owner.display_name ?? detail.owner.name ?? "Unknown author",
+        name: detail.owner.display_name ?? detail.owner.name ?? detail.owner.email ?? detail.owner.username ?? "Unknown author",
         email: detail.owner.email,
+        username: detail.owner.username,
         avatarUrl,
       },
       reviewers,

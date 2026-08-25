@@ -23,6 +23,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type FileSnapshotOption, MovedCodeCompare } from "@/components/moved-code-compare";
 import { RepositoryBrowser } from "@/components/repository-browser";
 import { createCodeViewDiffOptions, textMatchRanges, textPosition, updateWhitespaceMarkers } from "@/lib/code-view";
+import { normalizeGerritServer } from "@/lib/gerrit-url";
 import type { ChangeData, GerritComment, RelatedChange } from "@/lib/types";
 import type { GerritDiffTheme } from "@/lib/theme";
 
@@ -114,6 +115,28 @@ function saveReviewersExpanded(expanded: boolean) {
     window.localStorage.setItem(REVIEWERS_EXPANDED_STORAGE_KEY, String(expanded));
   } catch {
     // Keep the in-memory preference when browser storage is unavailable.
+  }
+}
+
+function personDashboardHref(data: ChangeData, returnTo: string | undefined, person: { name: string; email?: string; username?: string }) {
+  const owner = person.email ?? person.username ?? person.name;
+  try {
+    const url = new URL(returnTo ?? "/dashboard", "https://gerritdiff.local");
+    url.pathname = "/dashboard";
+    if (!url.searchParams.has("server")) url.searchParams.set("server", normalizeGerritServer(data.sourceUrl).toString());
+    if (!url.searchParams.has("user")) {
+      const fallbackUser = data.owner.email ?? data.owner.username ?? person.email ?? person.username;
+      if (!fallbackUser) return null;
+      url.searchParams.set("user", fallbackUser);
+    }
+    url.searchParams.set("scope", "all");
+    url.searchParams.set("state", "all");
+    url.searchParams.delete("owner");
+    url.searchParams.append("owner", owner);
+    for (const filter of ["wip", "project", "topic", "age", "sort"]) url.searchParams.delete(filter);
+    return `${url.pathname}?${url.searchParams}`;
+  } catch {
+    return null;
   }
 }
 
@@ -760,7 +783,7 @@ function ReviewFileTree({
   return <FileTree model={model} className="pierre-tree" />;
 }
 
-export function ChangeReview({ data, theme, initialThreadId, comparisonLoading = false, onPatchsetChange, onBaseChange }: { data: ChangeData; theme: GerritDiffTheme; initialThreadId?: string; comparisonLoading?: boolean; onPatchsetChange(patchset: number, threadId?: string): void; onBaseChange(base?: number): void }) {
+export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, comparisonLoading = false, onPatchsetChange, onBaseChange }: { data: ChangeData; theme: GerritDiffTheme; initialThreadId?: string; dashboardReturnTo?: string; comparisonLoading?: boolean; onPatchsetChange(patchset: number, threadId?: string): void; onBaseChange(base?: number): void }) {
   const viewerRef = useRef<CodeViewHandle<CommentMetadata> | null>(null);
   const codeViewContainerRef = useRef<HTMLDivElement | null>(null);
   const activeDraftRef = useRef<ActiveDraft | null>(null);
@@ -1623,6 +1646,7 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
   }, [commentScope, fileLevelThreads, loadFullDiff, loadingItems, localFileLevelComments, openCommentScope]);
 
   const initials = data.owner.name.split(/\s+/).slice(0, 2).map((word) => word[0]).join("").toUpperCase();
+  const changeOwnerDashboardHref = personDashboardHref(data, dashboardReturnTo, data.owner);
   const reviewers = data.reviewers ?? [];
   const checks = data.checks ?? [];
   const voteText = (value: number | undefined) => value === undefined ? "—" : value > 0 ? `+${value}` : String(value);
@@ -1697,7 +1721,7 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
           </div>
           <div className="change-meta">
             <span className="avatar" style={data.owner.avatarUrl ? { backgroundImage: `url(${data.owner.avatarUrl})` } : undefined}>{data.owner.avatarUrl ? null : initials}</span>
-            <strong>{data.owner.name}</strong>
+            {changeOwnerDashboardHref ? <a className="person-dashboard-link" href={changeOwnerDashboardHref}>{data.owner.name}</a> : <strong>{data.owner.name}</strong>}
             <span>updated {new Intl.DateTimeFormat("en", { dateStyle: "medium" }).format(new Date(data.updated))}</span>
             <span className="separator">•</span>
             <GitBranch size={14} /><code>{data.branch}</code>
@@ -1766,8 +1790,9 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
               <div className="reviewers-list">
                 {reviewers.length ? reviewers.map((reviewer, index) => {
                   const reviewerInitials = reviewer.name.split(/\s+/).slice(0, 2).map((word) => word[0]).join("").toUpperCase();
-                  return (
-                    <span className="reviewer-chip" key={reviewer.email ?? `${reviewer.name}:${index}`} title={reviewer.email}>
+                  const dashboardHref = personDashboardHref(data, dashboardReturnTo, reviewer);
+                  const content = (
+                    <>
                       <span className="reviewer-avatar">{reviewer.avatarUrl ? <Image src={reviewer.avatarUrl} alt="" width={19} height={19} unoptimized /> : reviewerInitials}</span>
                       <strong>{reviewer.name}</strong>
                       {reviewer.codeReview !== undefined && reviewer.codeReview !== 0 && (
@@ -1776,8 +1801,11 @@ export function ChangeReview({ data, theme, initialThreadId, comparisonLoading =
                       {reviewer.verified !== undefined && reviewer.verified !== 0 && (
                         <span className={`reviewer-vote verified ${voteClass(reviewer.verified)}`} title={`Verified ${voteText(reviewer.verified)}`} aria-label={`Verified ${voteText(reviewer.verified)}`}>V {voteText(reviewer.verified)}</span>
                       )}
-                    </span>
+                    </>
                   );
+                  return dashboardHref
+                    ? <a className="reviewer-chip" key={reviewer.email ?? `${reviewer.name}:${index}`} href={dashboardHref} title={`View ${reviewer.name}'s changes`}>{content}</a>
+                    : <span className="reviewer-chip" key={reviewer.email ?? `${reviewer.name}:${index}`} title={reviewer.email}>{content}</span>;
                 }) : <span className="reviewers-empty">No current reviewers</span>}
               </div>
             )}

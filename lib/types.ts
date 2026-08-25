@@ -43,6 +43,7 @@ export type RelatedChange = {
 export type GerritReviewer = {
   name: string;
   email?: string;
+  username?: string;
   avatarUrl?: string;
   codeReview?: number;
   verified?: number;
@@ -88,7 +89,7 @@ export type DashboardChange = {
   status: string;
   updated: string;
   patchset?: number;
-  owner: { name: string; username?: string; avatarUrl?: string };
+  owner: { name: string; email?: string; username?: string; avatarUrl?: string };
   scopes: DashboardScope[];
   group: DashboardGroup;
   evidence: DashboardEvidence;
@@ -138,7 +139,7 @@ export type ChangeData = {
   project: string;
   branch: string;
   status: string;
-  owner: { name: string; email?: string; avatarUrl?: string };
+  owner: { name: string; email?: string; username?: string; avatarUrl?: string };
   reviewers: GerritReviewer[];
   checks: ChangeCheck[];
   revision: string;

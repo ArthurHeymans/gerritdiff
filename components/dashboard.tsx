@@ -166,7 +166,7 @@ function saveViewState(profile: DashboardProfile, state: DashboardViewState) {
   window.sessionStorage.setItem(viewStateKey(profile), JSON.stringify({ scrollY: state.scrollY }));
 }
 
-const DASHBOARD_CACHE_VERSION = 6;
+const DASHBOARD_CACHE_VERSION = 7;
 const DASHBOARD_DATA_EVENT = "gerritdiff:dashboard-data-change";
 
 function dashboardDataKey(profile: DashboardProfile) {
@@ -239,18 +239,22 @@ function changeMatchesScope(change: DashboardChange, scope: "all" | DashboardSco
 function ChangeRow({
   change,
   href,
+  ownerHref,
   abandonSelected,
   identityAccountId,
   ownershipRevision,
   onOpen,
+  onOpenOwner,
   onToggleAbandon,
 }: {
   change: DashboardChange;
   href: string;
+  ownerHref: string;
   abandonSelected: boolean;
   identityAccountId?: number;
   ownershipRevision: string;
   onOpen(change: DashboardChange): void;
+  onOpenOwner(change: DashboardChange): void;
   onToggleAbandon(change: DashboardChange): void;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -261,7 +265,7 @@ function ChangeRow({
   const ownershipError = ownershipState.revision === ownershipRevision ? ownershipState.error : "";
   const ownershipLoading = ownershipLoadingRevision === ownershipRevision;
   const changeAge = relativeAge(change.updated);
-  const scope = change.scopes.includes("mine") ? "Mine" : "Reviewing";
+  const scope = change.scopes.includes("mine") ? "Mine" : change.scopes.includes("reviewing") ? "Reviewing" : "Everything";
   const needsOwnerApproval = change.requirements.some((requirement) => requirement.status === "UNSATISFIED" && /owner/i.test(requirement.name));
 
   useEffect(() => () => ownershipController.current?.abort(), []);
@@ -293,11 +297,12 @@ function ChangeRow({
 
   return (
     <article className={`dashboard-change dashboard-change-${change.group} evidence-${change.evidence}${change.status === "WIP" ? " is-wip" : ""}`}>
-      <a className="dashboard-change-main" href={href} onClick={(event) => {
-        if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
-        event.preventDefault();
-        onOpen(change);
-      }}>
+      <div className="dashboard-change-main">
+        <a className="dashboard-change-link-overlay" href={href} aria-label={`Open ${change.subject}`} onClick={(event) => {
+          if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+          event.preventDefault();
+          onOpen(change);
+        }} />
         <span className="dashboard-change-title">
           <strong>{change.subject}</strong>
           <small>{change.project} #{change.changeNumber}{change.patchset ? ` · PS${change.patchset}` : ""} · {scope}{change.status === "WIP" && <b className="dashboard-wip-badge">WIP</b>}{change.topic ? ` · ${change.topic}` : ""}</small>
@@ -306,15 +311,23 @@ function ChangeRow({
           <strong>{change.facts.join(" · ") || "Details pending"}</strong>
           <span>{change.evidence === "inferred" ? "Likely: " : ""}{change.diagnosis}</span>
         </span>
-        <span className="dashboard-change-owner"><small>Owner</small><strong>{change.owner.name}</strong></span>
+        <span className="dashboard-change-owner"><small>Owner</small><a href={ownerHref} onClick={(event) => {
+          if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+          event.preventDefault();
+          onOpenOwner(change);
+        }}>{change.owner.name}</a></span>
         <time className={changeAge.days >= 7 ? "overdue" : changeAge.days >= 3 ? "stale" : ""} dateTime={change.updated} title={`Last updated ${new Date(changeAge.timestamp).toLocaleString()}`}>Updated {changeAge.label}</time>
-      </a>
+      </div>
       <button className="dashboard-change-expand" type="button" aria-expanded={expanded} aria-label={expanded ? "Collapse change details" : "Expand change details"} onClick={toggleDetails}>
         {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
       </button>
       {expanded && (
         <div className="dashboard-change-details">
-          <div><span>Owner</span><strong>{change.owner.name}</strong></div>
+          <div><span>Owner</span><a className="dashboard-person-link" href={ownerHref} onClick={(event) => {
+            if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+            event.preventDefault();
+            onOpenOwner(change);
+          }}>{change.owner.name}</a></div>
           <div><span>Branch</span><strong>{change.branch}</strong></div>
           <div><span>Why this status?</span><strong>{confidenceLabel(change)}</strong></div>
           {needsOwnerApproval && <div className="dashboard-ownership"><span>Owner requirement</span><strong>{ownershipLabel(ownership, ownershipLoading, ownershipError, identityAccountId)}</strong></div>}
@@ -362,7 +375,9 @@ function Group({
   identityAccountId,
   ownershipRevision,
   changeHref,
+  ownerHref,
   onOpen,
+  onOpenOwner,
   onToggleAbandon,
 }: {
   group: (typeof GROUPS)[number];
@@ -372,7 +387,9 @@ function Group({
   identityAccountId?: number;
   ownershipRevision: string;
   changeHref(change: DashboardChange): string;
+  ownerHref(change: DashboardChange): string;
   onOpen(change: DashboardChange): void;
+  onOpenOwner(change: DashboardChange): void;
   onToggleAbandon(change: DashboardChange): void;
 }) {
   return (
@@ -383,7 +400,7 @@ function Group({
       </div>
       <div className="dashboard-group-list">
         {changes.length > 0 ? changes.map((change) => (
-          <ChangeRow key={change.id} change={change} href={changeHref(change)} abandonSelected={Object.hasOwn(abandonQueue, change.id)} identityAccountId={identityAccountId} ownershipRevision={ownershipRevision} onOpen={onOpen} onToggleAbandon={onToggleAbandon} />
+          <ChangeRow key={change.id} change={change} href={changeHref(change)} ownerHref={ownerHref(change)} abandonSelected={Object.hasOwn(abandonQueue, change.id)} identityAccountId={identityAccountId} ownershipRevision={ownershipRevision} onOpen={onOpen} onOpenOwner={onOpenOwner} onToggleAbandon={onToggleAbandon} />
         )) : (
           <div className="dashboard-group-empty">No changes in this group.</div>
         )}
@@ -578,6 +595,16 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
     router.push(changeHref(change));
   }
 
+  function ownerHref(change: DashboardChange) {
+    const owner = change.owner.email ?? change.owner.username ?? change.owner.name;
+    const state: DashboardViewState = { ...DEFAULT_VIEW_STATE, scope: "all", workState: "all", owners: [owner], sort, scrollY: 0 };
+    return `/dashboard?${dashboardSearchParams(profile, state, data?.identity.accountId ?? profile.accountId)}`;
+  }
+
+  function openOwner(change: DashboardChange) {
+    router.push(ownerHref(change));
+  }
+
   async function copyDashboardLink(kind: "exact" | "filters") {
     const params = dashboardSearchParams(profile, currentViewState(), data?.identity.accountId ?? profile.accountId, kind === "exact");
     const url = new URL(`/dashboard?${params}`, window.location.origin);
@@ -616,11 +643,11 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
     if (activityAgeFilter < 0) return days <= Math.abs(activityAgeFilter);
     return true;
   }), [activityAgeFilter, data, project]);
-  const ownerOptions = useMemo(() => [...new Map(projectFiltered.map((change) => [change.owner.username ?? change.owner.name, change.owner.name])).entries()]
+  const ownerOptions = useMemo(() => [...new Map(projectFiltered.map((change) => [change.owner.email ?? change.owner.username ?? change.owner.name, change.owner.name])).entries()]
     .toSorted((left, right) => left[1].localeCompare(right[1])), [projectFiltered]);
   const selectedOwnerSet = useMemo(() => new Set(selectedOwners), [selectedOwners]);
   const ownerFiltered = useMemo(() => projectFiltered.filter((change) => (
-    selectedOwnerSet.size === 0 || selectedOwnerSet.has(change.owner.username ?? change.owner.name)
+    selectedOwnerSet.size === 0 || selectedOwnerSet.has(change.owner.email ?? change.owner.username ?? change.owner.name)
   )), [projectFiltered, selectedOwnerSet]);
   const ownerFilterActive = selectedOwnerSet.size > 0;
   const topicOptionsSource = useMemo(() => ownerFiltered.filter((change) => changeMatchesScope(change, scope, ownerFilterActive)), [ownerFilterActive, ownerFiltered, scope]);
@@ -830,7 +857,9 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
                 identityAccountId={data?.identity.accountId ?? profile.accountId}
                 ownershipRevision={data?.fetchedAt ?? ""}
                 changeHref={changeHref}
+                ownerHref={ownerHref}
                 onOpen={openChange}
+                onOpenOwner={openOwner}
                 onToggleAbandon={toggleAbandon}
               />
             ))}

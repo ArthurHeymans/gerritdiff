@@ -133,7 +133,7 @@ function Viewer({ data, initialThreadId, loading, returnTo }: { data: ChangeData
           <ThemeButton />
         </div>
       </header>
-      <ChangeReview key={`${data.revision}:${data.baseRevisionNumber ?? "parent"}`} data={data} theme={theme} initialThreadId={initialThreadId} comparisonLoading={loading} onPatchsetChange={openPatchset} onBaseChange={(base) => openComparison(data.revisionNumber, base)} />
+      <ChangeReview key={`${data.revision}:${data.baseRevisionNumber ?? "parent"}`} data={data} theme={theme} initialThreadId={initialThreadId} dashboardReturnTo={returnTo} comparisonLoading={loading} onPatchsetChange={openPatchset} onBaseChange={(base) => openComparison(data.revisionNumber, base)} />
     </main>
   );
 }

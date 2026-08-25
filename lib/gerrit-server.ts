@@ -9,6 +9,8 @@ type ParsedGerritUrl = {
   sshHost: string;
   change: string;
   revision: string;
+  /** Project inferred from a modern Gerrit URL, when present. */
+  project?: string;
 };
 
 type GerritAccount = {
@@ -45,7 +47,7 @@ type GerritDetail = {
   deletions?: number;
 };
 
-function parseGerritUrl(input: string): ParsedGerritUrl {
+export function parseGerritUrl(input: string): ParsedGerritUrl {
   let url: URL;
   try {
     url = new URL(input);
@@ -60,7 +62,9 @@ function parseGerritUrl(input: string): ParsedGerritUrl {
   const match = modern ?? legacy;
   if (!match) throw new Error("That doesn't look like a Gerrit change URL.");
   const sshHost = url.hostname.replace(/^\[(.*)\]$/, "$1");
-  return { origin: url.origin, host: url.host, sshHost, change: match[1], revision: match[2] ?? "current" };
+  const projectMatch = url.pathname.match(/^\/c\/(.+?)\/\+\/\d+/);
+  const project = projectMatch ? decodeURIComponent(projectMatch[1]) : undefined;
+  return { origin: url.origin, host: url.host, sshHost, change: match[1], revision: match[2] ?? "current", project };
 }
 
 function isPrivateAddress(address: string): boolean {

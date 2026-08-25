@@ -24,7 +24,8 @@ import { type FileSnapshotOption, MovedCodeCompare } from "@/components/moved-co
 import { RepositoryBrowser } from "@/components/repository-browser";
 import { createCodeViewDiffOptions, textMatchRanges, textPosition, updateWhitespaceMarkers } from "@/lib/code-view";
 import { normalizeGerritServer } from "@/lib/gerrit-url";
-import type { ChangeData, GerritComment, RelatedChange } from "@/lib/types";
+import { gerritDiffHref, linkifyText } from "@/lib/linkify";
+import type { ChangeData, GerritComment, GerritCommentLink, RelatedChange } from "@/lib/types";
 import type { GerritDiffTheme } from "@/lib/theme";
 
 type DiscussionThread = { key: string; id: string; path: string; comments: GerritComment[] };
@@ -520,7 +521,49 @@ function suggestionOriginal(comment: GerritComment) {
   }).join("\n");
 }
 
-function CommentText({ comment }: { comment: GerritComment }) {
+function LinkifiedText({ text, origin, links, returnTo }: { text: string; origin: string; links: GerritCommentLink[]; returnTo?: string }) {
+  return linkifyText(text, origin, links).map((part, index) => part.href
+    ? <a key={index} href={gerritDiffHref(part.href, origin, returnTo) ?? part.href}>{part.text}</a>
+    : part.text);
+}
+
+function linkifyCommitMessage(root: ShadowRoot, origin: string, links: GerritCommentLink[], returnTo?: string) {
+  if (!root.querySelector("style[data-gerritdiff-links]")) {
+    const style = document.createElement("style");
+    style.dataset.gerritdiffLinks = "";
+    style.textContent = "a[data-gerritdiff-link] { color: var(--accent-strong, var(--diffs-modified-base)); text-decoration: underline; text-underline-offset: 2px; }";
+    root.append(style);
+  }
+  for (const line of root.querySelectorAll<HTMLElement>("[data-line]")) {
+    const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT);
+    const nodes: Text[] = [];
+    let node: Node | null;
+    while ((node = walker.nextNode())) {
+      if (node.parentElement?.closest("a[data-gerritdiff-link]")) continue;
+      nodes.push(node as Text);
+    }
+    for (const textNode of nodes) {
+      const parts = linkifyText(textNode.data, origin, links);
+      if (!parts.some((part) => part.href)) continue;
+      const fragment = document.createDocumentFragment();
+      for (const part of parts) {
+        if (!part.href) {
+          fragment.append(document.createTextNode(part.text));
+          continue;
+        }
+        const anchor = document.createElement("a");
+        anchor.dataset.gerritdiffLink = "";
+        anchor.href = gerritDiffHref(part.href, origin, returnTo) ?? part.href;
+        anchor.textContent = part.text;
+        anchor.addEventListener("click", (event) => event.stopPropagation());
+        fragment.append(anchor);
+      }
+      textNode.replaceWith(fragment);
+    }
+  }
+}
+
+function CommentText({ comment, origin, links, returnTo }: { comment: GerritComment; origin: string; links: GerritCommentLink[]; returnTo?: string }) {
   const { message } = comment;
   const suggestion = message.match(/```suggestion\s*\n([\s\S]*?)```/);
   const renderText = (text: string, key: string) => {
@@ -529,8 +572,8 @@ function CommentText({ comment }: { comment: GerritComment }) {
     return (
       <div className="comment-markup" key={key}>
         {trimmed.split(/\n{2,}/).map((block, index) => block.split("\n").every((line) => line.trimStart().startsWith(">"))
-          ? <blockquote key={index}>{block.split("\n").map((line) => line.replace(/^\s*>\s?/, "")).join("\n")}</blockquote>
-          : <p key={index}>{block}</p>)}
+          ? <blockquote key={index}><LinkifiedText text={block.split("\n").map((line) => line.replace(/^\s*>\s?/, "")).join("\n")} origin={origin} links={links} returnTo={returnTo} /></blockquote>
+          : <p key={index}><LinkifiedText text={block} origin={origin} links={links} returnTo={returnTo} /></p>)}
       </div>
     );
   };
@@ -552,7 +595,7 @@ function CommentText({ comment }: { comment: GerritComment }) {
   );
 }
 
-function ExistingDiscussion({ annotation, expanded, localReply, onToggle, onSaveReply, onDeleteReply }: { annotation: DiffLineAnnotation<CommentMetadata> | LineAnnotation<CommentMetadata>; expanded: boolean; localReply?: LocalReply; onToggle(key: string): void; onSaveReply(reply: LocalReply): void; onDeleteReply(key: string): void }) {
+function ExistingDiscussion({ annotation, expanded, localReply, origin, links, returnTo, onToggle, onSaveReply, onDeleteReply }: { annotation: DiffLineAnnotation<CommentMetadata> | LineAnnotation<CommentMetadata>; expanded: boolean; localReply?: LocalReply; origin: string; links: GerritCommentLink[]; returnTo?: string; onToggle(key: string): void; onSaveReply(reply: LocalReply): void; onDeleteReply(key: string): void }) {
   const metadata = annotation.metadata;
   const [replyEditor, setReplyEditor] = useState<{ message: string; resolved: boolean } | null>(null);
   if (!metadata || metadata.kind !== "existing") return null;
@@ -602,7 +645,7 @@ function ExistingDiscussion({ annotation, expanded, localReply, onToggle, onSave
           </span>
           <div>
             <div className="existing-comment-meta"><strong>{comment.author.name}</strong><span>{comment.id.startsWith("local-reply-") ? "Local reply" : `Patchset ${comment.patchSet}`}</span></div>
-            <CommentText comment={comment} />
+            <CommentText comment={comment} origin={origin} links={links} returnTo={returnTo} />
           </div>
         </div>
       ))}
@@ -821,6 +864,7 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
   const [codeReview, setCodeReview] = useState("");
   const [copied, setCopied] = useState(false);
   const commitMessageContent = data.commitMessage;
+  const sourceOrigin = new URL(data.sourceUrl).origin;
 
   const files = useMemo(() => {
     if (!data.comparisonFiles) return parsePatchFiles(data.patch, `${data.host}-${data.changeNumber}-${data.revisionNumber}`, true).flatMap((parsed) => parsed.files);
@@ -1119,12 +1163,18 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
   useEffect(() => {
     const container = codeViewContainerRef.current;
     if (!container) return;
-    let frame = requestAnimationFrame(refreshCommentHighlights);
+    const refreshRenderedContent = () => {
+      refreshCommentHighlights();
+      for (const rendered of viewerRef.current?.getInstance()?.getRenderedItems() ?? []) {
+        if (rendered.id === "commit-message" && rendered.element.shadowRoot) linkifyCommitMessage(rendered.element.shadowRoot, sourceOrigin, data.commentLinks, dashboardReturnTo);
+      }
+    };
+    let frame = requestAnimationFrame(refreshRenderedContent);
     const observedRoots = new WeakSet<ShadowRoot>();
     const shadowObservers: MutationObserver[] = [];
     const scheduleRefresh = () => {
       cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(refreshCommentHighlights);
+      frame = requestAnimationFrame(refreshRenderedContent);
     };
     const observeShadowRoots = () => {
       for (const host of container.querySelectorAll<HTMLElement>("diffs-container")) {
@@ -1149,7 +1199,7 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
       // SAFETY: CSS.highlights is a progressive browser API absent from the current TypeScript DOM declarations.
       (CSS as unknown as { highlights?: { delete(name: string): void } }).highlights?.delete(COMMENT_HIGHLIGHT_NAME);
     };
-  }, [refreshCommentHighlights]);
+  }, [dashboardReturnTo, data.commentLinks, refreshCommentHighlights, sourceOrigin]);
 
   const updateCommentItem = useCallback((itemId: string, update: (item: CodeViewItem<CommentMetadata>) => boolean) => {
     const viewer = viewerRef.current;
@@ -1484,12 +1534,12 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
   const renderAnnotation = useCallback((annotation: DiffLineAnnotation<CommentMetadata> | LineAnnotation<CommentMetadata>, item: CodeViewItem<CommentMetadata>) => {
     if (!annotation.metadata) return null;
     if (annotation.metadata.kind === "existing") {
-      return <ExistingDiscussion annotation={annotation} expanded={false} localReply={localReplies.find((reply) => reply.key === annotation.metadata?.key)} onToggle={toggleActiveDiscussion} onSaveReply={saveLocalReply} onDeleteReply={deleteLocalReply} />;
+      return <ExistingDiscussion annotation={annotation} expanded={false} localReply={localReplies.find((reply) => reply.key === annotation.metadata?.key)} origin={sourceOrigin} links={data.commentLinks} returnTo={dashboardReturnTo} onToggle={toggleActiveDiscussion} onSaveReply={saveLocalReply} onDeleteReply={deleteLocalReply} />;
     }
     return annotation.metadata.kind === "draft"
       ? <DraftComment annotation={annotation} itemId={item.id} onCancel={removeComment} onSave={saveComment} />
       : <SavedComment annotation={annotation} itemId={item.id} onDelete={removeComment} onSelect={toggleCommentSelection} onEdit={editComment} onToggleResolved={toggleCommentResolved} />;
-  }, [deleteLocalReply, editComment, localReplies, removeComment, saveComment, saveLocalReply, toggleActiveDiscussion, toggleCommentResolved, toggleCommentSelection]);
+  }, [dashboardReturnTo, data.commentLinks, deleteLocalReply, editComment, localReplies, removeComment, saveComment, saveLocalReply, sourceOrigin, toggleActiveDiscussion, toggleCommentResolved, toggleCommentSelection]);
 
   const renderHeaderPrefix = useCallback((item: CodeViewItem<CommentMetadata>) => {
     const disabled = item.type === "diff"
@@ -2003,6 +2053,9 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
                   annotation={annotation}
                   expanded
                   localReply={localReplies.find((reply) => reply.key === `gerrit:${thread.key}`)}
+                  origin={sourceOrigin}
+                  links={data.commentLinks}
+                  returnTo={dashboardReturnTo}
                   onToggle={() => undefined}
                   onSaveReply={saveLocalReply}
                   onDeleteReply={deleteLocalReply}
@@ -2063,6 +2116,9 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
                 annotation={activePanelAnnotation}
                 expanded
                 localReply={localReplies.find((reply) => reply.key === activeThreadKey)}
+                origin={sourceOrigin}
+                links={data.commentLinks}
+                returnTo={dashboardReturnTo}
                 onToggle={() => { setRightPanel(null); updateThreadUrl(); }}
                 onSaveReply={saveLocalReply}
                 onDeleteReply={deleteLocalReply}

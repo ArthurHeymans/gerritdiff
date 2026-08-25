@@ -121,6 +121,15 @@ export type DashboardData = {
   mergedLoaded?: boolean;
 };
 
+export type GerritCommentLink = {
+  match: string;
+  link: string;
+  prefix?: string;
+  suffix?: string;
+  text?: string;
+  enabled?: boolean;
+};
+
 export type ChangeData = {
   /** Gerrit's HTTP authority, used to scope UI settings and credentials. */
   host: string;
@@ -130,6 +139,8 @@ export type ChangeData = {
   changeNumber: number;
   subject: string;
   commitMessage: string;
+  /** Gerrit project comment links, including inherited site-wide shortcuts. */
+  commentLinks: GerritCommentLink[];
   // Gerrit's /COMMIT_MSG magic file prefixes the message with generated header
   // lines (Parent/Merge Of, Author, AuthorDate, Commit, CommitDate, blank), so
   // comment line numbers on that path are offset by this many lines.

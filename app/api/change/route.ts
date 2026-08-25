@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { parseGerritJson, publicFetch, resolveChange } from "@/lib/gerrit-server";
-import type { ChangeCheck, ChangeData, ComparisonFile, GerritComment, GerritReviewer, RelatedChange } from "@/lib/types";
+import { parseGerritJson, parseGerritUrl, publicFetch, resolveChange } from "@/lib/gerrit-server";
+import type { ChangeCheck, ChangeData, ComparisonFile, GerritComment, GerritCommentLink, GerritReviewer, RelatedChange } from "@/lib/types";
 
 export const runtime = "nodejs";
 
@@ -36,6 +36,7 @@ type GerritRelatedChange = {
   status?: string;
 };
 type GerritRelatedChanges = { changes: GerritRelatedChange[] };
+type GerritProjectConfig = { commentlinks?: Record<string, GerritCommentLink> };
 
 async function fetchRevisionContent(changePath: string, revision: string | number, path: string) {
   const response = await publicFetch(`${changePath}/revisions/${encodeURIComponent(revision)}/files/${encodeURIComponent(path)}/content`, "text/plain", true);
@@ -169,7 +170,16 @@ export async function GET(request: NextRequest) {
     const requestedBase = request.nextUrl.searchParams.get("base");
     if (!sourceUrl) return NextResponse.json({ error: "Missing Gerrit URL." }, { status: 400 });
 
+    // Modern Gerrit URLs carry the project name, so start this relatively slow
+    // request alongside change resolution instead of serializing it afterwards.
+    const parsedSource = parseGerritUrl(sourceUrl);
+    const hintedProjectConfig = parsedSource.project
+      ? fetchOptionalComments(`${parsedSource.origin}/projects/${encodeURIComponent(parsedSource.project)}/config`)
+      : Promise.resolve(null);
     const { parsed, detail, revision, revisionNumber } = await resolveChange(sourceUrl);
+    const projectConfigPromise = parsedSource.project === detail.project
+      ? hintedProjectConfig
+      : fetchOptionalComments(`${parsed.origin}/projects/${encodeURIComponent(detail.project)}/config`);
     const selectedRevision = Object.values(detail.revisions).find((item) => item._number === revisionNumber);
     // Preserve the exact message text: /COMMIT_MSG comment lines are relative to it,
     // so trimming leading blank lines would move every displayed/published anchor.
@@ -190,13 +200,14 @@ export async function GET(request: NextRequest) {
       : undefined;
     const changePath = `${parsed.origin}/changes/${encodeURIComponent(parsed.change)}`;
     const revisionPath = `${changePath}/revisions/${encodeURIComponent(revision)}`;
-    const [patchResponse, comparison, fileStats, commentsResponse, portedCommentsResponse, relatedResponse] = await Promise.all([
+    const [patchResponse, comparison, fileStats, commentsResponse, portedCommentsResponse, relatedResponse, projectConfigResponse] = await Promise.all([
       baseRevisionNumber === undefined ? publicFetch(`${revisionPath}/patch`, "text/plain") : Promise.resolve(null),
       baseRevisionNumber === undefined ? Promise.resolve(undefined) : fetchComparison(changePath, revision, baseRevisionNumber),
       baseRevisionNumber === undefined ? fetchFileStats(revisionPath) : Promise.resolve(undefined),
       fetchOptionalComments(`${changePath}/comments?enable-context=true&context-padding=0`),
       fetchOptionalComments(`${revisionPath}/ported_comments`),
       fetchOptionalComments(`${revisionPath}/related`),
+      projectConfigPromise,
     ]);
     let patch = "";
     if (patchResponse) {
@@ -229,6 +240,10 @@ export async function GET(request: NextRequest) {
       }),
     ];
 
+    const projectConfig = projectConfigResponse
+      ? parseGerritJson<GerritProjectConfig>(await projectConfigResponse.text())
+      : {};
+    const commentLinks = Object.values(projectConfig.commentlinks ?? {}).filter((link) => link.enabled !== false);
     const relatedChanges = relatedResponse
       ? parseGerritJson<GerritRelatedChanges>(await relatedResponse.text()).changes
       : [];
@@ -307,6 +322,7 @@ export async function GET(request: NextRequest) {
       changeNumber: detail._number,
       subject: commitSubject,
       commitMessage,
+      commentLinks,
       commitMessageLineOffset,
       baseCommitMessageLineOffset,
       project: detail.project,

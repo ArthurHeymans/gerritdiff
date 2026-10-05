@@ -138,9 +138,10 @@ export async function resolveChange(sourceUrl: string) {
   const detailResponse = await publicFetch(detailUrl);
   if (!detailResponse) throw new Error("Change not found.");
   const detail = parseGerritJson<GerritDetail>(await detailResponse.text());
-  const revision = parsed.revision === "current" ? detail.current_revision : parsed.revision;
-  const revisionInfo = parsed.revision === "current"
-    ? detail.revisions[detail.current_revision]
-    : Object.values(detail.revisions).find((item) => item._number === Number(parsed.revision));
-  return { parsed, detail, revision, revisionNumber: revisionInfo?._number ?? (Number(parsed.revision) || 0) };
+  const selectedRevision = parsed.revision === "current"
+    ? Object.entries(detail.revisions).find(([id]) => id === detail.current_revision)
+    : Object.entries(detail.revisions).find(([, item]) => item._number === Number(parsed.revision));
+  if (!selectedRevision) throw new Error("Patchset not found.");
+  const [revision, revisionInfo] = selectedRevision;
+  return { parsed, detail, revision, revisionNumber: revisionInfo._number };
 }

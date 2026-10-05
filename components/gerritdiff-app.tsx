@@ -6,7 +6,7 @@ import { ExternalLink, LayoutDashboard, LoaderCircle } from "lucide-react";
 import { HomeLink, Logo, ThemeButton, UrlForm } from "@/components/app-chrome";
 import { ChangeReview } from "@/components/change-review";
 import { Dashboard, DashboardProfileForm } from "@/components/dashboard";
-import { normalizeGerritServer } from "@/lib/gerrit-url";
+import { normalizeGerritServer, patchsetUrl } from "@/lib/gerrit-url";
 import { useGerritDiffTheme } from "@/lib/theme";
 import type { ChangeData, DashboardProfile } from "@/lib/types";
 
@@ -85,25 +85,6 @@ function Landing({ onSaveProfile }: { onSaveProfile(profile: DashboardProfile): 
       </footer>
     </main>
   );
-}
-
-function patchsetUrl(sourceUrl: string, changeNumber: number, patchset: number) {
-  let url: URL;
-  try {
-    url = new URL(sourceUrl);
-  } catch {
-    return sourceUrl;
-  }
-  const modern = url.pathname.match(/(\/\+\/(\d+))(?:\/\d+)?(?:\/.*)?$/);
-  if (modern && Number(modern[2]) === changeNumber) {
-    url.pathname = url.pathname.replace(/(\/\+\/\d+)(?:\/\d+)?(?:\/.*)?$/, `$1/${patchset}`);
-  } else {
-    const legacy = url.hash.match(/(\/c\/(\d+))(?:\/\d+)?(?:\/.*)?$/);
-    if (legacy && Number(legacy[2]) === changeNumber) {
-      url.hash = url.hash.replace(/(\/c\/\d+)(?:\/\d+)?(?:\/.*)?$/, `$1/${patchset}`);
-    }
-  }
-  return url.toString();
 }
 
 function Viewer({ data, initialThreadId, loading, returnTo }: { data: ChangeData; initialThreadId?: string; loading: boolean; returnTo?: string }) {

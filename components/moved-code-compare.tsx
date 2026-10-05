@@ -213,13 +213,13 @@ export function MovedCodeCompare({
   }, [newContent, oldContent, searchQuery]);
   const crossFileDiff = useMemo(() => oldContent !== undefined && newContent !== undefined
     ? parseDiffFromFile(
-        { name: oldPath, contents: oldContent, cacheKey: `${baseLabel}:${oldPath}:ignore-indent-${ignoreIndentation}` },
-        { name: newPath, contents: newContent, cacheKey: `${targetLabel}:${newPath}:ignore-indent-${ignoreIndentation}` },
+        { name: oldPath, contents: oldContent, cacheKey: `${sourceUrl}:${baseLabel}:${oldPath}:ignore-indent-${ignoreIndentation}` },
+        { name: newPath, contents: newContent, cacheKey: `${sourceUrl}:${targetLabel}:${newPath}:ignore-indent-${ignoreIndentation}` },
         { ignoreWhitespace: ignoreIndentation },
         true,
       )
     : undefined,
-  [baseLabel, ignoreIndentation, newContent, newPath, oldContent, oldPath, targetLabel]);
+  [baseLabel, ignoreIndentation, newContent, newPath, oldContent, oldPath, sourceUrl, targetLabel]);
 
   const refreshSearchHighlights = useCallback(() => {
     const registry = (CSS as unknown as { highlights?: { set(name: string, highlight: unknown): void; delete(name: string): void } }).highlights;

@@ -23,7 +23,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type FileSnapshotOption, MovedCodeCompare } from "@/components/moved-code-compare";
 import { RepositoryBrowser } from "@/components/repository-browser";
 import { createCodeViewDiffOptions, textMatchRanges, textPosition, updateWhitespaceMarkers } from "@/lib/code-view";
-import { normalizeGerritServer } from "@/lib/gerrit-url";
+import { normalizeGerritServer, patchsetUrl } from "@/lib/gerrit-url";
 import { gerritDiffHref, linkifyText } from "@/lib/linkify";
 import type { ChangeData, GerritComment, GerritCommentLink, RelatedChange } from "@/lib/types";
 import type { GerritDiffTheme } from "@/lib/theme";
@@ -865,6 +865,9 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
   const [copied, setCopied] = useState(false);
   const commitMessageContent = data.commitMessage;
   const sourceOrigin = new URL(data.sourceUrl).origin;
+  // The input URL may mean "current". Snapshot requests must follow the displayed
+  // patchset, not a separately cached (or newly uploaded) current revision.
+  const revisionSourceUrl = patchsetUrl(data.sourceUrl, data.changeNumber, data.revisionNumber);
 
   const files = useMemo(() => {
     if (!data.comparisonFiles) return parsePatchFiles(data.patch, `${data.host}-${data.changeNumber}-${data.revisionNumber}`, true).flatMap((parsed) => parsed.files);
@@ -1560,8 +1563,8 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
     setRepositoryError("");
     try {
       const [current, parent] = await Promise.all([
-        fetchFileContent(data.sourceUrl, item.fileDiff.name),
-        fetchFileContent(data.sourceUrl, item.fileDiff.prevName ?? item.fileDiff.name, 1),
+        fetchFileContent(revisionSourceUrl, item.fileDiff.name),
+        fetchFileContent(revisionSourceUrl, item.fileDiff.prevName ?? item.fileDiff.name, 1),
       ]);
       if (current.binary || parent.binary) throw new Error("Binary files cannot be expanded in CodeView.");
       const fullDiff = parseDiffFromFile(
@@ -1584,7 +1587,7 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
         return next;
       });
     }
-  }, [data.revision, data.sourceUrl, loadingItems]);
+  }, [data.revision, revisionSourceUrl, loadingItems]);
 
   const selectDiscussion = useCallback(async (thread: DiscussionThread) => {
     const key = `gerrit:${thread.key}`;
@@ -1649,7 +1652,7 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
     setLoadingItems((current) => new Set(current).add(itemId));
     setRepositoryError("");
     try {
-      const file = await fetchFileContent(data.sourceUrl, path);
+      const file = await fetchFileContent(revisionSourceUrl, path);
       if (!file.exists) throw new Error(`${path} does not exist in this patchset.`);
       if (file.binary) throw new Error(`${path} is binary and cannot be displayed.`);
       viewer.addItems([{ id: itemId, type: "file", file: { name: path, contents: file.content ?? "", cacheKey: `${data.revision}:${path}` } }]);
@@ -1663,7 +1666,7 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
         return next;
       });
     }
-  }, [data.revision, data.sourceUrl, loadingItems, pathToChangedId, scrollToItem]);
+  }, [data.revision, revisionSourceUrl, loadingItems, pathToChangedId, scrollToItem]);
 
   const renderHeaderMetadata = useCallback((item: CodeViewItem<CommentMetadata>) => {
     const path = item.type === "diff" ? item.fileDiff.name : item.id === "commit-message" ? "/COMMIT_MSG" : undefined;
@@ -1746,7 +1749,7 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
           <button className={sidebarMode === "discussion" ? "active" : ""} onClick={() => { setSidebarMode("discussion"); saveProjectUiSettings(data.host, data.project, { sidebarMode: "discussion" }); }} title={`${currentDiscussionCount} on this patchset, ${discussionThreads.length} total`}>Discussion <b>{currentDiscussionCount}/{discussionThreads.length}</b></button>
         </div>
         {sidebarMode === "changed" && <ReviewFileTree files={files} onSelect={scrollToItem} />}
-        {sidebarMode === "repository" && <RepositoryBrowser changedFiles={files} sourceUrl={data.sourceUrl} onOpenFile={openRepositoryFile} />}
+        {sidebarMode === "repository" && <RepositoryBrowser changedFiles={files} sourceUrl={revisionSourceUrl} onOpenFile={openRepositoryFile} />}
         {sidebarMode === "discussion" && <DiscussionSidebar threads={discussionThreads} revisionNumber={data.revisionNumber} onSelect={(thread) => void selectDiscussion(thread)} />}
         {sidebarMode === "repository" && (
           <form className="known-path-form" onSubmit={(event) => { event.preventDefault(); const path = knownPath.trim().replace(/^\/+/, ""); if (path) void openRepositoryFile(path); }}>
@@ -1997,7 +2000,7 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
             {movedCodeOpen && (
               <MovedCodeCompare
                 key={`${data.revision}:${data.baseRevisionNumber ?? "parent"}`}
-                sourceUrl={data.sourceUrl}
+                sourceUrl={revisionSourceUrl}
                 oldFiles={movedCodeFiles.old}
                 newFiles={movedCodeFiles.new}
                 baseLabel={data.baseRevisionNumber ? `Patchset ${data.baseRevisionNumber}` : "Parent"}

@@ -1,6 +1,27 @@
 const GERRIT_UI_PATH_MARKERS = ["/c/", "/q/", "/dashboard/", "/admin/", "/settings/", "/plugins/"];
 const GERRIT_API_PATH_MARKERS = ["/changes/", "/accounts/", "/projects/"];
 
+/** Pin a change URL to one patchset without losing the server's path prefix. */
+export function patchsetUrl(sourceUrl: string, changeNumber: number, patchset: number) {
+  let url: URL;
+  try {
+    url = new URL(sourceUrl);
+  } catch {
+    return sourceUrl;
+  }
+  const changePath = /((?:\/\+|\/c)\/(\d+))(?:\/\d+)?(?:\/.*)?$/;
+  const pathMatch = url.pathname.match(changePath);
+  if (pathMatch && Number(pathMatch[2]) === changeNumber) {
+    url.pathname = url.pathname.replace(changePath, `$1/${patchset}`);
+  } else {
+    const hashMatch = url.hash.match(changePath);
+    if (hashMatch && Number(hashMatch[2]) === changeNumber) {
+      url.hash = url.hash.replace(changePath, `$1/${patchset}`);
+    }
+  }
+  return url.toString();
+}
+
 export function normalizeGerritServer(input: string) {
   const trimmed = input.trim();
   const candidate = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(trimmed) ? trimmed : `https://${trimmed}`;

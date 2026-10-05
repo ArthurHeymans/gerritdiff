@@ -41,7 +41,7 @@ export async function GET(request: NextRequest) {
       type: entry.type === "tree" ? "directory" : "file",
     }));
 
-    return NextResponse.json({ available: true, path, entries }, { headers: { "Cache-Control": "public, s-maxage=300, stale-while-revalidate=1800" } });
+    return NextResponse.json({ available: true, path, entries }, { headers: { "Cache-Control": parsed.revision === "current" ? "no-store" : "public, s-maxage=300, stale-while-revalidate=1800" } });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Couldn't browse this repository.";
     return NextResponse.json({ error: message }, { status: 400 });

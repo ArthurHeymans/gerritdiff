@@ -26,7 +26,7 @@ export async function GET(request: NextRequest) {
     if (binary) return NextResponse.json({ exists: true, binary: true, path, size: buffer.byteLength });
     return NextResponse.json(
       { exists: true, binary: false, path, content: buffer.toString("utf8"), size: buffer.byteLength },
-      { headers: { "Cache-Control": "public, s-maxage=300, stale-while-revalidate=1800" } },
+      { headers: { "Cache-Control": parsed.revision === "current" ? "no-store" : "public, s-maxage=300, stale-while-revalidate=1800" } },
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Couldn't load this file.";

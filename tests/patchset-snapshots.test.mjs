@@ -9,6 +9,9 @@ test("snapshot URLs are pinned to the displayed patchset", () => {
   for (const [input, expected] of [
     [sourceUrl, `${sourceUrl}/2`],
     [`${sourceUrl}/1/dbus-sdr/fruwrite.cpp`, `${sourceUrl}/2`],
+    [`${sourceUrl}/1..2`, `${sourceUrl}/2`],
+    [`${sourceUrl}/1..2/dbus-sdr/fruwrite.cpp`, `${sourceUrl}/2`],
+    ["https://example.com/gerrit/#/c/95217/1..2/file.cpp", "https://example.com/gerrit/#/c/95217/2"],
     ["https://example.com/gerrit/c/project/+/95217", "https://example.com/gerrit/c/project/+/95217/2"],
     ["https://example.com/gerrit/#/c/95217/1/file.cpp", "https://example.com/gerrit/#/c/95217/2"],
     ["https://example.com/c/95217", "https://example.com/c/95217/2"],
@@ -17,6 +20,19 @@ test("snapshot URLs are pinned to the displayed patchset", () => {
     assert.equal(pinned, expected);
     assert.equal(parseGerritUrl(pinned).revision, "2");
   }
+});
+
+test("Gerrit comparison URLs select the right-hand target and preserve the left-hand base", () => {
+  for (const url of [
+    `${sourceUrl}/1..2`,
+    `${sourceUrl}/1..2/file.cpp`,
+    "https://example.com/#/c/95217/1..2",
+    "https://example.com/c/95217/1..2/file.cpp",
+  ]) {
+    assert.equal(parseGerritUrl(url).revision, "2");
+    assert.equal(parseGerritUrl(url).baseRevision, "1");
+  }
+  assert.equal(parseGerritUrl(`${sourceUrl}/2`).baseRevision, undefined);
 });
 
 test("a pinned snapshot does not follow a newer current patchset", async (t) => {
@@ -37,5 +53,8 @@ test("a pinned snapshot does not follow a newer current patchset", async (t) => 
   assert.equal(snapshot.revision, ps1);
   assert.equal((await resolveChange(source)).revision, ps2);
   assert.equal((await resolveChange(`${source}/2`)).revision, ps2);
+  const comparison = await resolveChange(`${source}/1..2`);
+  assert.equal(comparison.revision, ps2);
+  assert.equal(comparison.parsed.baseRevision, "1");
   await assert.rejects(resolveChange(`${source}/3`), /Patchset not found/);
 });

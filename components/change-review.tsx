@@ -25,12 +25,11 @@ import { RepositoryBrowser } from "@/components/repository-browser";
 import { createCodeViewDiffOptions, textMatchRanges, textPosition, updateWhitespaceMarkers } from "@/lib/code-view";
 import { normalizeGerritServer, patchsetUrl } from "@/lib/gerrit-url";
 import { gerritDiffHref, linkifyText } from "@/lib/linkify";
+import { commentInput, commentIsOnDisplayedSide, wholeLineRange, type GerritCommentInput, type GerritTextRange, type LocalReviewComment } from "@/lib/review-comments";
 import type { ChangeData, GerritComment, GerritCommentLink, RelatedChange } from "@/lib/types";
 import type { GerritDiffTheme } from "@/lib/theme";
 
 type DiscussionThread = { key: string; id: string; path: string; comments: GerritComment[] };
-
-type GerritTextRange = { start_line: number; start_character: number; end_line: number; end_character: number };
 
 type CommentMetadata =
   | { kind: "draft"; key: string; message: string; range: SelectedLineRange; textRange?: GerritTextRange; unresolved?: boolean }
@@ -40,19 +39,8 @@ type CommentMetadata =
 type ActiveDraft = { itemId: string; key: string };
 type RightPanel = { kind: "relation" } | { kind: "scope"; path: string } | { kind: "discussion"; threadKey: string } | null;
 type LocalReply = { key: string; message: string; resolved: boolean };
-type LocalReviewComment = { key: string; path: string; message: string; range: SelectedLineRange; textRange?: GerritTextRange; gerritLine?: number; gerritRange?: GerritTextRange; parent?: number; inReplyTo?: string; unresolved?: boolean };
 type CodeTextSelection = { itemId: string; range: SelectedLineRange; textRange: GerritTextRange; top: number; left: number };
 type SearchMatch = { itemId: string; lineNumber: number; side?: "deletions" | "additions" };
-type GerritCommentInput = {
-  // Omitted for /PATCHSET_LEVEL comments; Gerrit defaults to REVISION.
-  side?: "PARENT" | "REVISION";
-  parent?: number;
-  line?: number;
-  range?: { start_line: number; start_character: number; end_line: number; end_character: number };
-  in_reply_to?: string;
-  message: string;
-  unresolved?: boolean;
-};
 
 const COMMENT_HIGHLIGHT_NAME = "gerrit-comment-range";
 const SEARCH_HIGHLIGHT_NAME = "gerrit-search-result";
@@ -311,70 +299,6 @@ function highlightedTextRanges(root: ShadowRoot, textRange: GerritTextRange, sid
     if (!range.collapsed) ranges.push(range);
   }
   return ranges;
-}
-
-function commentInput(comment: LocalReviewComment, file: FileDiffMetadata | undefined, lineOffset: number): GerritCommentInput {
-  const side = comment.range.endSide ?? comment.range.side ?? "additions";
-  // Gerrit rejects a patchset-level comment that carries side, line or range
-  // (CommentsValidator#ensureValidPatchsetLevelComment).
-  if (comment.path === "/PATCHSET_LEVEL") {
-    const patchsetInput: GerritCommentInput = { message: comment.message };
-    if (comment.inReplyTo) patchsetInput.in_reply_to = comment.inReplyTo;
-    if (comment.unresolved !== undefined) patchsetInput.unresolved = comment.unresolved;
-    return patchsetInput;
-  }
-  const offset = comment.path === "/COMMIT_MSG" ? lineOffset : 0;
-  const input: GerritCommentInput = {
-    side: side === "deletions" ? "PARENT" : "REVISION",
-    message: comment.message,
-  };
-  if (comment.parent !== undefined) input.parent = comment.parent;
-  if (comment.inReplyTo) input.in_reply_to = comment.inReplyTo;
-  if (comment.unresolved !== undefined) input.unresolved = comment.unresolved;
-  // Replies to /COMMIT_MSG comments retain their exact server coordinates,
-  // including comments in the generated header that the viewer does not render.
-  if (comment.gerritRange) {
-    input.range = {
-      start_line: comment.gerritRange.start_line,
-      start_character: comment.gerritRange.start_character,
-      end_line: comment.gerritRange.end_line,
-      end_character: comment.gerritRange.end_character,
-    };
-    return input;
-  }
-  if (comment.gerritLine !== undefined) {
-    input.line = comment.gerritLine;
-    return input;
-  }
-  if (comment.textRange) {
-    input.range = offset
-      ? { ...comment.textRange, start_line: comment.textRange.start_line + offset, end_line: comment.textRange.end_line + offset }
-      : comment.textRange;
-    return input;
-  }
-  if (comment.range.start === comment.range.end || !file) {
-    if (comment.range.end > 0) input.line = comment.range.end + offset;
-    return input;
-  }
-  const hunk = file.hunks.find((candidate) => {
-    const start = side === "deletions" ? candidate.deletionStart : candidate.additionStart;
-    const count = side === "deletions" ? candidate.deletionCount : candidate.additionCount;
-    return comment.range.end >= start && comment.range.end < start + count;
-  });
-  const start = hunk ? (side === "deletions" ? hunk.deletionStart : hunk.additionStart) : 0;
-  const lineIndex = hunk ? (side === "deletions" ? hunk.deletionLineIndex : hunk.additionLineIndex) + comment.range.end - start : -1;
-  const lineText = side === "deletions" ? file.deletionLines[lineIndex] : file.additionLines[lineIndex];
-  if (lineText === undefined) {
-    input.line = comment.range.end + offset;
-    return input;
-  }
-  input.range = {
-    start_line: comment.range.start + offset,
-    start_character: 0,
-    end_line: comment.range.end + offset,
-    end_character: lineText.length,
-  };
-  return input;
 }
 
 function shellArg(value: string) {
@@ -826,7 +750,7 @@ function ReviewFileTree({
   return <FileTree model={model} className="pierre-tree" />;
 }
 
-export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, comparisonLoading = false, onPatchsetChange, onBaseChange }: { data: ChangeData; theme: GerritDiffTheme; initialThreadId?: string; dashboardReturnTo?: string; comparisonLoading?: boolean; onPatchsetChange(patchset: number, threadId?: string): void; onBaseChange(base?: number): void }) {
+export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, comparisonLoading = false, onPatchsetChange, onBaseChange }: { data: ChangeData; theme: GerritDiffTheme; initialThreadId?: string; dashboardReturnTo?: string; comparisonLoading?: boolean; onPatchsetChange(patchset: number, threadId?: string): void; onBaseChange(base?: number, threadId?: string): void }) {
   const viewerRef = useRef<CodeViewHandle<CommentMetadata> | null>(null);
   const codeViewContainerRef = useRef<HTMLDivElement | null>(null);
   const activeDraftRef = useRef<ActiveDraft | null>(null);
@@ -915,7 +839,7 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
         file: { name: "Commit message", contents: commitMessageContent, cacheKey: `${data.revision}:commit-message` },
         annotations: discussionThreads.flatMap((thread): LineAnnotation<CommentMetadata>[] => {
           const anchor = threadAnchor(thread, data.revisionNumber);
-          if (!anchor || anchor.path !== "/COMMIT_MSG") return [];
+          if (!anchor || anchor.path !== "/COMMIT_MSG" || !commentIsOnDisplayedSide(anchor, data.baseRevisionNumber)) return [];
           const range = commentRange(anchor);
           return [{
             lineNumber: range.end,
@@ -927,7 +851,7 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
         const annotations: DiffLineAnnotation<CommentMetadata>[] = [];
         for (const thread of discussionThreads) {
           const anchor = threadAnchor(thread, data.revisionNumber);
-          if (!anchor || anchor.path !== fileDiff.name) continue;
+          if (!anchor || anchor.path !== fileDiff.name || !commentIsOnDisplayedSide(anchor, data.baseRevisionNumber)) continue;
           const range = commentRange(anchor);
           annotations.push({
             side: range.side ?? "additions",
@@ -938,7 +862,7 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
         return { id: `file-${index}`, type: "diff" as const, fileDiff, annotations };
       }),
     ],
-    [commitMessageContent, data.revision, data.revisionNumber, discussionThreads, files],
+    [commitMessageContent, data.baseRevisionNumber, data.revision, data.revisionNumber, discussionThreads, files],
   );
   const pathToChangedId = useMemo(
     () => new Map(files.map((file, index) => [file.name, `file-${index}`])),
@@ -1293,7 +1217,16 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
   const createDraft = useCallback((range: SelectedLineRange, itemId: string, textRange?: GerritTextRange) => {
     const item = viewerRef.current?.getItem(itemId);
     const side = range.endSide ?? range.side ?? (item?.type === "file" ? "additions" : undefined);
-    if (!side) return;
+    if (!side || !item) return;
+    // Capture the range against the displayed item, which may have been expanded
+    // or opened from the repository and is not present in the original patch.
+    if (!textRange && range.start !== range.end) {
+      textRange = wholeLineRange(range, item.type === "diff" ? item.fileDiff : item.file);
+      if (!textRange) {
+        setRepositoryError("Select lines on one side of a loaded file before commenting.");
+        return;
+      }
+    }
     const key = `draft-${nextCommentRef.current++}`;
     const previous = activeDraftRef.current;
     if (previous && previous.itemId !== itemId) removeComment(previous.itemId, previous.key);
@@ -1604,6 +1537,8 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
     }
 
     const anchor = threadAnchor(thread, data.revisionNumber);
+    // Keep comments in the panel without scrolling/highlighting unrelated code.
+    if (anchor && !commentIsOnDisplayedSide(anchor, data.baseRevisionNumber)) return;
     const path = anchor?.path ?? thread.path;
     const itemId = path === "/COMMIT_MSG" ? "commit-message" : pathToChangedId.get(path);
     // Patchset-level threads (and threads on files absent from this patchset) have no
@@ -1617,7 +1552,7 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
     const range = commentRange(anchor);
     setSelectedLines(anchor.range ? null : { id: itemId, range });
     viewerRef.current?.scrollTo({ type: "range", id: itemId, range, align: "center", behavior: "smooth" });
-  }, [data.revisionNumber, loadFullDiff, onPatchsetChange, pathToChangedId, scrollToItem, updateThreadUrl]);
+  }, [data.baseRevisionNumber, data.revisionNumber, loadFullDiff, onPatchsetChange, pathToChangedId, scrollToItem, updateThreadUrl]);
 
   useEffect(() => {
     if (!initialThreadId || openedInitialThreadRef.current === initialThreadId) return;
@@ -1706,7 +1641,7 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
   const voteClass = (value: number | undefined) => value === undefined || value === 0 ? "neutral" : value > 0 ? "positive" : "negative";
   const activeThread = activeThreadKey ? discussionThreads.find((thread) => `gerrit:${thread.key}` === activeThreadKey) : undefined;
   const activeAnchor = activeThread ? threadAnchor(activeThread, data.revisionNumber) : undefined;
-  const activeRange = activeAnchor ? commentRange(activeAnchor) : undefined;
+  const activeRange = activeAnchor && commentIsOnDisplayedSide(activeAnchor, data.baseRevisionNumber) ? commentRange(activeAnchor) : undefined;
   const activeAnnotation: DiffLineAnnotation<CommentMetadata> | LineAnnotation<CommentMetadata> | undefined = activeThread && activeAnchor && activeRange
     ? activeAnchor.path === "/COMMIT_MSG"
       ? {
@@ -2113,6 +2048,12 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
                     : "File comments apply to the whole file instead of a specific line — useful for “this file should be split up” style feedback."}</p>
                 )}
               </>
+            )}
+            {!commentScope && !relationPanelOpen && activeAnchor?.side === "PARENT" && data.baseRevisionNumber !== undefined && (
+              <p className="patchset-empty-hint">
+                This comment is on the target patchset’s parent, not patchset {data.baseRevisionNumber}.
+                {activeAnchor.path !== "/COMMIT_MSG" && <button type="button" onClick={() => onBaseChange(undefined, activeThread?.key)}>View on parent</button>}
+              </p>
             )}
             {!commentScope && !relationPanelOpen && activePanelAnnotation ? (
               <ExistingDiscussion

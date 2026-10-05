@@ -188,7 +188,8 @@ export async function GET(request: NextRequest) {
     // /COMMIT_MSG header, per Gerrit's MagicFile#forCommitMessage: one line per parent
     // (none for a root commit), Author, AuthorDate, Commit, CommitDate, then a blank line.
     const commitMessageLineOffset = (selectedRevision?.commit?.parents?.length ?? 0) + 5;
-    const baseRevisionNumber = requestedBase ? Number(requestedBase) : undefined;
+    const comparisonBase = requestedBase ?? parsed.baseRevision;
+    const baseRevisionNumber = comparisonBase === undefined ? undefined : Number(comparisonBase);
     const baseRevision = baseRevisionNumber === undefined
       ? undefined
       : Object.values(detail.revisions).find((item) => item._number === baseRevisionNumber);

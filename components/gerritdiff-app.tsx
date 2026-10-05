@@ -114,17 +114,17 @@ function Viewer({ data, initialThreadId, loading, returnTo }: { data: ChangeData
           <ThemeButton />
         </div>
       </header>
-      <ChangeReview key={`${data.revision}:${data.baseRevisionNumber ?? "parent"}`} data={data} theme={theme} initialThreadId={initialThreadId} dashboardReturnTo={returnTo} comparisonLoading={loading} onPatchsetChange={openPatchset} onBaseChange={(base) => openComparison(data.revisionNumber, base)} />
+      <ChangeReview key={`${data.revision}:${data.baseRevisionNumber ?? "parent"}`} data={data} theme={theme} initialThreadId={initialThreadId} dashboardReturnTo={returnTo} comparisonLoading={loading} onPatchsetChange={openPatchset} onBaseChange={(base, threadId) => openComparison(data.revisionNumber, base, threadId)} />
     </main>
   );
 }
 
 function ChangeLoader({ url, base, threadId, returnTo }: { url: string; base?: string; threadId?: string; returnTo?: string }) {
   const [data, setData] = useState<ChangeData | null>(null);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<{ request: string; message: string } | null>(null);
   const [loadedRequest, setLoadedRequest] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
-  const requestKey = `${url}:${base ?? "parent"}`;
+  const requestKey = JSON.stringify([url, base ?? null]);
   const loading = loadedRequest !== requestKey;
 
   useEffect(() => {
@@ -136,16 +136,18 @@ function ChangeLoader({ url, base, threadId, returnTo }: { url: string; base?: s
         return body as ChangeData;
       })
       .then((nextData) => {
+        if (controller.signal.aborted) return;
         setData(nextData);
         setLoadedRequest(requestKey);
+        setError(null);
       })
       .catch((reason) => {
-        if (reason.name !== "AbortError") setError(reason.message);
+        if (!controller.signal.aborted) setError({ request: requestKey, message: reason.message });
       });
     return () => controller.abort();
   }, [attempt, base, requestKey, url]);
 
-  if (error) return (
+  if (error?.request === requestKey) return (
     <main className="state-page">
       <nav className="nav shell"><HomeLink /><ThemeButton /></nav>
       <div className="state-card error-card">
@@ -154,12 +156,12 @@ function ChangeLoader({ url, base, threadId, returnTo }: { url: string; base?: s
         <p className="state-guidance">Check the Gerrit URL, try again, or paste a different change below.</p>
         <UrlForm initial={url} />
         <div className="state-actions">
-          <button type="button" onClick={() => { setError(""); setAttempt((current) => current + 1); }}>Try again</button>
+          <button type="button" onClick={() => { setError(null); setAttempt((current) => current + 1); }}>Try again</button>
           <button type="button" className="secondary" onClick={() => window.location.assign("/")}>Start over</button>
         </div>
         <details className="error-details">
           <summary>Technical details</summary>
-          <p>{error}</p>
+          <p>{error.message}</p>
         </details>
       </div>
     </main>

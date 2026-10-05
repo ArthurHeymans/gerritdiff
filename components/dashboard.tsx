@@ -501,7 +501,8 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const { server: profileServer, username: profileUsername, accountId: profileAccountId } = profile;
-  const initialViewState = useMemo(() => readUrlViewState(searchParams, DEFAULT_VIEW_STATE), [searchParams]);
+  // Navigation and filter controls share one source of truth, including Back/Forward.
+  const viewState = useMemo(() => readUrlViewState(searchParams, DEFAULT_VIEW_STATE), [searchParams]);
   const initialScrollY = useMemo(() => readViewState(profile).scrollY, [profile]);
   const hydrated = useSyncExternalStore(subscribeHydration, () => true, () => false);
   const cachedSnapshot = useSyncExternalStore(subscribeDashboardData, () => dashboardDataSnapshot(profile), () => "");
@@ -513,16 +514,9 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
   const [refreshError, setRefreshError] = useState("");
   const [isRefreshing, setIsRefreshing] = useState(true);
   const [refresh, setRefresh] = useState(0);
-  const [scope, setScope] = useState<"all" | DashboardScope>(initialViewState.scope);
-  const [workState, setWorkState] = useState<"all" | DashboardGroup>(initialViewState.workState);
+  const { scope, workState, wipFilter, project, owners: selectedOwners, topic, sort, activityAgeFilter } = viewState;
   const mergedView = workState === "merged";
   const data = fetchedData && Boolean(fetchedData.mergedLoaded) === mergedView ? fetchedData : null;
-  const [wipFilter, setWipFilter] = useState<"all" | "wip" | "reviewable">(initialViewState.wipFilter);
-  const [project, setProject] = useState(initialViewState.project);
-  const [selectedOwners, setSelectedOwners] = useState(initialViewState.owners);
-  const [topic, setTopic] = useState(initialViewState.topic);
-  const [sort, setSort] = useState<"priority" | "freshest" | "oldest">(initialViewState.sort);
-  const [activityAgeFilter, setActivityAgeFilter] = useState(initialViewState.activityAgeFilter);
   const [abandonQueue, setAbandonQueue] = useState<Record<string, string>>({});
   const [sshHost, setSshHost] = useState(() => normalizeGerritServer(profile.server).hostname);
   const [sshPort, setSshPort] = useState("29418");
@@ -530,12 +524,16 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
   const [shareCopied, setShareCopied] = useState<"exact" | "filters" | null>(null);
 
   useEffect(() => {
-    const state = { scope, workState, wipFilter, project, owners: selectedOwners, topic, sort, activityAgeFilter, scrollY: window.scrollY };
-    saveViewState(profile, state);
-    const canonical = dashboardSearchParams(profile, state, profile.accountId);
+    saveViewState(profile, { ...viewState, scrollY: window.scrollY });
+    const canonical = dashboardSearchParams(profile, viewState, profile.accountId);
     const target = `/dashboard?${canonical}`;
     if (pathname !== "/dashboard" || searchParams.toString() !== canonical.toString()) router.replace(target, { scroll: false });
-  }, [activityAgeFilter, pathname, profile, project, router, scope, searchParams, selectedOwners, sort, topic, wipFilter, workState]);
+  }, [pathname, profile, router, searchParams, viewState]);
+
+  function updateView(update: Partial<DashboardViewState>) {
+    const next = { ...viewState, ...update };
+    router.replace(`/dashboard?${dashboardSearchParams(profile, next, profile.accountId)}`, { scroll: false });
+  }
 
   useEffect(() => {
     if (!data || initialScrollY <= 0) return;
@@ -717,16 +715,16 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
           <section>
             <h2>Scope</h2>
             {(["all", "mine", "reviewing", "everything"] as const).map((value) => (
-              <button key={value} type="button" className={scope === value ? "active" : ""} onClick={() => { setScope(value); setTopic("all"); }}>
+              <button key={value} type="button" className={scope === value ? "active" : ""} onClick={() => updateView({ scope: value, topic: "all" })}>
                 <span>{value === "all" ? "All work" : value === "mine" ? "Mine" : value === "reviewing" ? "Reviewing" : "Everything"}</span><b>{counts[value]}</b>
               </button>
             ))}
           </section>
           <section>
             <h2>Work state</h2>
-            <button type="button" className={workState === "all" ? "active" : ""} onClick={() => setWorkState("all")}><span>All states</span><b title={allStatesCount === "?" ? "Not fetched for the current view" : undefined}>{allStatesCount}</b></button>
+            <button type="button" className={workState === "all" ? "active" : ""} onClick={() => updateView({ workState: "all" })}><span>All states</span><b title={allStatesCount === "?" ? "Not fetched for the current view" : undefined}>{allStatesCount}</b></button>
             {GROUPS.map((group) => (
-              <button key={group.id} type="button" className={workState === group.id ? "active" : ""} onClick={() => setWorkState(group.id)}>
+              <button key={group.id} type="button" className={workState === group.id ? "active" : ""} onClick={() => updateView({ workState: group.id })}>
                 <span>{group.label.replace(" · you decide", "")}</span><b title={workStateCount(group.id) === "?" ? "Not fetched for the current view" : undefined}>{workStateCount(group.id)}</b>
               </button>
             ))}
@@ -734,7 +732,7 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
           <section>
             <h2>Review state</h2>
             {(["all", "wip", "reviewable"] as const).map((value) => (
-              <button key={value} type="button" className={wipFilter === value ? "active" : ""} onClick={() => setWipFilter(value)}>
+              <button key={value} type="button" className={wipFilter === value ? "active" : ""} onClick={() => updateView({ wipFilter: value })}>
                 <span>{value === "all" ? "All changes" : value === "wip" ? "Work in progress" : "Ready for review"}</span><b>{wipCounts[value]}</b>
               </button>
             ))}
@@ -758,16 +756,16 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
         </div>
 
         <div className="dashboard-controls">
-          <select aria-label="Filter by project" value={project} onChange={(event) => { setProject(event.target.value); setTopic("all"); }}>
+          <select aria-label="Filter by project" value={project} onChange={(event) => updateView({ project: event.target.value, topic: "all" })}>
             <option value="all">All projects</option>
             {projects.map((value) => <option key={value} value={value}>{value}</option>)}
           </select>
-          <OwnerMultiSelect options={ownerOptions} selected={selectedOwners} onChange={(selected) => { setSelectedOwners(selected); setTopic("all"); }} />
-          <select aria-label="Filter by topic" value={topic} onChange={(event) => setTopic(event.target.value)}>
+          <OwnerMultiSelect options={ownerOptions} selected={selectedOwners} onChange={(selected) => updateView({ owners: selected, topic: "all" })} />
+          <select aria-label="Filter by topic" value={topic} onChange={(event) => updateView({ topic: event.target.value })}>
             <option value="all">All topics</option>
             {topics.map((value) => <option key={value} value={value}>{value}</option>)}
           </select>
-          <select aria-label="Filter by time since latest Gerrit activity" value={activityAgeFilter} onChange={(event) => setActivityAgeFilter(Number(event.target.value))}>
+          <select aria-label="Filter by time since latest Gerrit activity" value={activityAgeFilter} onChange={(event) => updateView({ activityAgeFilter: Number(event.target.value) })}>
             <option value={0}>Any activity age</option>
             <optgroup label="Recently active">
               <option value={-1}>Updated within 1 day</option>
@@ -788,7 +786,7 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
               <option value={180}>Inactive for ≥6 months</option>
             </optgroup>
           </select>
-          <select aria-label="Sort changes" value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}>
+          <select aria-label="Sort changes" value={sort} onChange={(event) => updateView({ sort: event.target.value as typeof sort })}>
             <option value="priority">Priority</option>
             <option value="freshest">Newest activity</option>
             <option value="oldest">Oldest activity</option>

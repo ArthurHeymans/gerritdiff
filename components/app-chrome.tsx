@@ -36,6 +36,10 @@ export function ThemeButton() {
 }
 
 export function UrlForm({ initial = "", compact = false }: { initial?: string; compact?: boolean }) {
+  return <UrlInput key={initial} initial={initial} compact={compact} />;
+}
+
+function UrlInput({ initial, compact }: { initial: string; compact: boolean }) {
   const [value, setValue] = useState(initial);
   const input = useRef<HTMLInputElement>(null);
 

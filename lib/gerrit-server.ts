@@ -9,6 +9,8 @@ type ParsedGerritUrl = {
   sshHost: string;
   change: string;
   revision: string;
+  /** Left patchset in Gerrit's base..target comparison URL. */
+  baseRevision?: string;
   /** Project inferred from a modern Gerrit URL, when present. */
   project?: string;
 };
@@ -57,14 +59,14 @@ export function parseGerritUrl(input: string): ParsedGerritUrl {
   if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("Only HTTP(S) Gerrit URLs are supported.");
 
   const fullPath = `${url.pathname}${url.hash}`;
-  const modern = fullPath.match(/\/\+\/(\d+)(?:\/(\d+))?/);
-  const legacy = fullPath.match(/\/(?:#\/)?c\/(\d+)(?:\/(\d+))?/);
+  const modern = fullPath.match(/\/\+\/(\d+)(?:\/(\d+)(?:\.\.(\d+))?)?(?=\/|#|$)/);
+  const legacy = fullPath.match(/\/(?:#\/)?c\/(\d+)(?:\/(\d+)(?:\.\.(\d+))?)?(?=\/|#|$)/);
   const match = modern ?? legacy;
   if (!match) throw new Error("That doesn't look like a Gerrit change URL.");
   const sshHost = url.hostname.replace(/^\[(.*)\]$/, "$1");
   const projectMatch = url.pathname.match(/^\/c\/(.+?)\/\+\/\d+/);
   const project = projectMatch ? decodeURIComponent(projectMatch[1]) : undefined;
-  return { origin: url.origin, host: url.host, sshHost, change: match[1], revision: match[2] ?? "current", project };
+  return { origin: url.origin, host: url.host, sshHost, change: match[1], revision: match[3] ?? match[2] ?? "current", baseRevision: match[3] ? match[2] : undefined, project };
 }
 
 function isPrivateAddress(address: string): boolean {

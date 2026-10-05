@@ -9,7 +9,7 @@ export function patchsetUrl(sourceUrl: string, changeNumber: number, patchset: n
   } catch {
     return sourceUrl;
   }
-  const changePath = /((?:\/\+|\/c)\/(\d+))(?:\/\d+)?(?:\/.*)?$/;
+  const changePath = /((?:\/\+|\/c)\/(\d+))(?:\/\d+(?:\.\.\d+)?)?(?:\/.*)?$/;
   const pathMatch = url.pathname.match(changePath);
   if (pathMatch && Number(pathMatch[2]) === changeNumber) {
     url.pathname = url.pathname.replace(changePath, `$1/${patchset}`);

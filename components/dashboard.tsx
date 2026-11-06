@@ -2,8 +2,9 @@
 
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { AlertTriangle, ChevronDown, ChevronRight, ExternalLink, LoaderCircle, RefreshCw, Search, Settings2, Share2 } from "lucide-react";
-import { Logo, ThemeButton, UrlForm } from "@/components/app-chrome";
+import { AlertTriangle, ChevronDown, ChevronRight, ExternalLink, LoaderCircle, RefreshCw, Search, Settings2, Share2, X } from "lucide-react";
+import { Logo, ThemeButton, UrlForm, WorkspaceActions } from "@/components/app-chrome";
+import { Dialog } from "@/components/dialog";
 import { normalizeGerritServer } from "@/lib/gerrit-url";
 import type { DashboardChange, DashboardData, DashboardGroup, DashboardOwnership, DashboardProfile, DashboardScope } from "@/lib/types";
 
@@ -522,6 +523,7 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
   const [sshPort, setSshPort] = useState("29418");
   const [commandCopied, setCommandCopied] = useState(false);
   const [shareCopied, setShareCopied] = useState<"exact" | "filters" | null>(null);
+  const [filtersOpen, setFiltersOpen] = useState(false);
 
   useEffect(() => {
     saveViewState(profile, { ...viewState, scrollY: window.scrollY });
@@ -699,46 +701,92 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
     }
   }
 
+  const sidebarFilters = (
+    <aside className="dashboard-sidebar" aria-label="Dashboard filters">
+      <section>
+        <h2>Scope</h2>
+        {(["all", "mine", "reviewing", "everything"] as const).map((value) => (
+          <button key={value} type="button" className={scope === value ? "active" : ""} onClick={() => updateView({ scope: value, topic: "all" })}>
+            <span>{value === "all" ? "All work" : value === "mine" ? "Mine" : value === "reviewing" ? "Reviewing" : "Everything"}</span><b>{counts[value]}</b>
+          </button>
+        ))}
+      </section>
+      <section>
+        <h2>Work state</h2>
+        <button type="button" className={workState === "all" ? "active" : ""} onClick={() => updateView({ workState: "all" })}><span>All states</span><b title={allStatesCount === "?" ? "Not fetched for the current view" : undefined}>{allStatesCount}</b></button>
+        {GROUPS.map((group) => (
+          <button key={group.id} type="button" className={workState === group.id ? "active" : ""} onClick={() => updateView({ workState: group.id })}>
+            <span>{group.label.replace(" · you decide", "")}</span><b title={workStateCount(group.id) === "?" ? "Not fetched for the current view" : undefined}>{workStateCount(group.id)}</b>
+          </button>
+        ))}
+      </section>
+      <section>
+        <h2>Review state</h2>
+        {(["all", "wip", "reviewable"] as const).map((value) => (
+          <button key={value} type="button" className={wipFilter === value ? "active" : ""} onClick={() => updateView({ wipFilter: value })}>
+            <span>{value === "all" ? "All changes" : value === "wip" ? "Work in progress" : "Ready for review"}</span><b>{wipCounts[value]}</b>
+          </button>
+        ))}
+      </section>
+      {abandonChanges.length > 0 && <div className="dashboard-sidebar-queue"><span>Flagged for abandonment</span><b>{abandonChanges.length}</b></div>}
+    </aside>
+  );
+  const detailedFilters = (
+    <div className="dashboard-controls">
+      <select aria-label="Filter by project" value={project} onChange={(event) => updateView({ project: event.target.value, topic: "all" })}>
+        <option value="all">All projects</option>
+        {projects.map((value) => <option key={value} value={value}>{value}</option>)}
+      </select>
+      <OwnerMultiSelect options={ownerOptions} selected={selectedOwners} onChange={(selected) => updateView({ owners: selected, topic: "all" })} />
+      <select aria-label="Filter by topic" value={topic} onChange={(event) => updateView({ topic: event.target.value })}>
+        <option value="all">All topics</option>
+        {topics.map((value) => <option key={value} value={value}>{value}</option>)}
+      </select>
+      <select aria-label="Filter by time since latest Gerrit activity" value={activityAgeFilter} onChange={(event) => updateView({ activityAgeFilter: Number(event.target.value) })}>
+        <option value={0}>Any activity age</option>
+        <optgroup label="Recently active">
+          <option value={-1}>Updated within 1 day</option>
+          <option value={-3}>Updated within 3 days</option>
+          <option value={-7}>Updated within 7 days</option>
+          <option value={-14}>Updated within 14 days</option>
+          <option value={-30}>Updated within 1 month</option>
+          <option value={-60}>Updated within 2 months</option>
+          <option value={-180}>Updated within 6 months</option>
+        </optgroup>
+        <optgroup label="Inactive">
+          <option value={1}>Inactive for ≥1 day</option>
+          <option value={3}>Inactive for ≥3 days</option>
+          <option value={7}>Inactive for ≥7 days</option>
+          <option value={14}>Inactive for ≥14 days</option>
+          <option value={30}>Inactive for ≥1 month</option>
+          <option value={60}>Inactive for ≥2 months</option>
+          <option value={180}>Inactive for ≥6 months</option>
+        </optgroup>
+      </select>
+      <select aria-label="Sort changes" value={sort} onChange={(event) => updateView({ sort: event.target.value as typeof sort })}>
+        <option value="priority">Priority</option>
+        <option value="freshest">Newest activity</option>
+        <option value="oldest">Oldest activity</option>
+      </select>
+    </div>
+  );
+  const activeFilterCount = [scope !== "all", workState !== "all", wipFilter !== "all", project !== "all", selectedOwners.length > 0, topic !== "all", activityAgeFilter !== 0, sort !== "priority"].filter(Boolean).length;
+
   return (
     <main className="dashboard-page">
       <header className="dashboard-topbar">
         <Logo />
         <UrlForm compact />
         <div className="dashboard-topbar-actions">
+          <WorkspaceActions>
           <span className="dashboard-identity"><b>{displayServer(profile.server)}</b><small>{sharedIdentity ? "Viewing shared dashboard as" : "Viewing as"} {data?.identity.name ?? profile.username}</small></span>
           <button className="icon-button" type="button" aria-label="Change dashboard profile" onClick={onForget}><Settings2 size={16} /></button>
           <ThemeButton />
+          </WorkspaceActions>
         </div>
       </header>
       <div className="dashboard-workspace">
-        <aside className="dashboard-sidebar">
-          <section>
-            <h2>Scope</h2>
-            {(["all", "mine", "reviewing", "everything"] as const).map((value) => (
-              <button key={value} type="button" className={scope === value ? "active" : ""} onClick={() => updateView({ scope: value, topic: "all" })}>
-                <span>{value === "all" ? "All work" : value === "mine" ? "Mine" : value === "reviewing" ? "Reviewing" : "Everything"}</span><b>{counts[value]}</b>
-              </button>
-            ))}
-          </section>
-          <section>
-            <h2>Work state</h2>
-            <button type="button" className={workState === "all" ? "active" : ""} onClick={() => updateView({ workState: "all" })}><span>All states</span><b title={allStatesCount === "?" ? "Not fetched for the current view" : undefined}>{allStatesCount}</b></button>
-            {GROUPS.map((group) => (
-              <button key={group.id} type="button" className={workState === group.id ? "active" : ""} onClick={() => updateView({ workState: group.id })}>
-                <span>{group.label.replace(" · you decide", "")}</span><b title={workStateCount(group.id) === "?" ? "Not fetched for the current view" : undefined}>{workStateCount(group.id)}</b>
-              </button>
-            ))}
-          </section>
-          <section>
-            <h2>Review state</h2>
-            {(["all", "wip", "reviewable"] as const).map((value) => (
-              <button key={value} type="button" className={wipFilter === value ? "active" : ""} onClick={() => updateView({ wipFilter: value })}>
-                <span>{value === "all" ? "All changes" : value === "wip" ? "Work in progress" : "Ready for review"}</span><b>{wipCounts[value]}</b>
-              </button>
-            ))}
-          </section>
-          {abandonChanges.length > 0 && <div className="dashboard-sidebar-queue"><span>Flagged for abandonment</span><b>{abandonChanges.length}</b></div>}
-        </aside>
+        {sidebarFilters}
         <div className="dashboard-shell">
         <div className="dashboard-heading">
           <div>
@@ -746,6 +794,7 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
             <p>{headingCount} change{headingCount === 1 ? "" : "s"} in view · {activeGroup?.hint ?? "all open work states"} · public changes only</p>
           </div>
           <div className="dashboard-heading-actions">
+            <button type="button" className="dashboard-filters-toggle" aria-label="Filters" aria-haspopup="dialog" onClick={() => setFiltersOpen(true)}><Settings2 size={15} /> Filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}</button>
             <button type="button" onClick={() => copyDashboardLink("exact")}><Share2 size={13} /> {shareCopied === "exact" ? "Copied exact view" : "Share exact view"}</button>
             <button type="button" onClick={() => copyDashboardLink("filters")}><Share2 size={13} /> {shareCopied === "filters" ? "Copied filter view" : "Share filters"}</button>
             <button type="button" className="dashboard-refresh" onClick={reload} disabled={hydrated && isRefreshing}>
@@ -755,43 +804,12 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
           </div>
         </div>
 
-        <div className="dashboard-controls">
-          <select aria-label="Filter by project" value={project} onChange={(event) => updateView({ project: event.target.value, topic: "all" })}>
-            <option value="all">All projects</option>
-            {projects.map((value) => <option key={value} value={value}>{value}</option>)}
-          </select>
-          <OwnerMultiSelect options={ownerOptions} selected={selectedOwners} onChange={(selected) => updateView({ owners: selected, topic: "all" })} />
-          <select aria-label="Filter by topic" value={topic} onChange={(event) => updateView({ topic: event.target.value })}>
-            <option value="all">All topics</option>
-            {topics.map((value) => <option key={value} value={value}>{value}</option>)}
-          </select>
-          <select aria-label="Filter by time since latest Gerrit activity" value={activityAgeFilter} onChange={(event) => updateView({ activityAgeFilter: Number(event.target.value) })}>
-            <option value={0}>Any activity age</option>
-            <optgroup label="Recently active">
-              <option value={-1}>Updated within 1 day</option>
-              <option value={-3}>Updated within 3 days</option>
-              <option value={-7}>Updated within 7 days</option>
-              <option value={-14}>Updated within 14 days</option>
-              <option value={-30}>Updated within 1 month</option>
-              <option value={-60}>Updated within 2 months</option>
-              <option value={-180}>Updated within 6 months</option>
-            </optgroup>
-            <optgroup label="Inactive">
-              <option value={1}>Inactive for ≥1 day</option>
-              <option value={3}>Inactive for ≥3 days</option>
-              <option value={7}>Inactive for ≥7 days</option>
-              <option value={14}>Inactive for ≥14 days</option>
-              <option value={30}>Inactive for ≥1 month</option>
-              <option value={60}>Inactive for ≥2 months</option>
-              <option value={180}>Inactive for ≥6 months</option>
-            </optgroup>
-          </select>
-          <select aria-label="Sort changes" value={sort} onChange={(event) => updateView({ sort: event.target.value as typeof sort })}>
-            <option value="priority">Priority</option>
-            <option value="freshest">Newest activity</option>
-            <option value="oldest">Oldest activity</option>
-          </select>
-        </div>
+        {detailedFilters}
+        {filtersOpen && <Dialog className="dashboard-filter-dialog" labelledBy="dashboard-filter-title" onClose={() => setFiltersOpen(false)}>
+          <header><h2 id="dashboard-filter-title">Filters</h2><button type="button" className="icon-button" aria-label="Close filters" onClick={() => setFiltersOpen(false)}><X size={18} /></button></header>
+          <div className="dashboard-filter-body">{sidebarFilters}{detailedFilters}</div>
+          <footer><button type="button" onClick={() => setFiltersOpen(false)}>Show results</button></footer>
+        </Dialog>}
 
         {data?.warnings.length ? (
           <div className="dashboard-warning"><AlertTriangle size={14} /><div>{data.warnings.map((warning) => <p key={`${warning.source}:${warning.message}`}><b>{warning.source}:</b> {warning.message}</p>)}</div></div>
@@ -843,6 +861,12 @@ export function Dashboard({ profile, onForget, sharedIdentity = false }: { profi
           <div className="dashboard-empty"><strong>All caught up</strong><span>No matching public open changes were found.</span></div>
         ) : data.changes.length === 0 ? (
           <div className="dashboard-empty is-uncertain"><strong>No verified results</strong><span>One or more queries failed, so this is not an all-clear state.</span></div>
+        ) : visible.length === 0 ? (
+          <div className="dashboard-filter-empty" role="status">
+            <strong>No changes match these filters</strong>
+            <span>Your dashboard has changes, but none match the current view.</span>
+            <button type="button" onClick={() => updateView({ scope: "everything", workState: "all", wipFilter: "all", project: "all", owners: [], topic: "all", activityAgeFilter: 0 })}>Reset filters</button>
+          </div>
         ) : (
           <div className="dashboard-groups">
             {GROUPS.filter((group) => grouped[group.id].length > 0 || workState === group.id).map((group) => (

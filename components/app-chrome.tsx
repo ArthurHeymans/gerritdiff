@@ -1,7 +1,8 @@
 "use client";
 
-import { useRef, useState } from "react";
-import { ArrowRight, Moon, Search, Sun, X } from "lucide-react";
+import { useId, useRef, useState, type ReactNode } from "react";
+import { ArrowRight, Moon, MoreHorizontal, Search, Sun, X } from "lucide-react";
+import { Dialog } from "@/components/dialog";
 import { setGerritDiffTheme, useGerritDiffTheme } from "@/lib/theme";
 
 export function Logo() {
@@ -33,6 +34,19 @@ export function ThemeButton() {
       {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
     </button>
   );
+}
+
+export function WorkspaceActions({ children }: { children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const titleId = useId();
+  return <>
+    <div className="workspace-actions-desktop">{children}</div>
+    <button type="button" className="icon-button workspace-actions-toggle" aria-label="Workspace actions" aria-haspopup="dialog" onClick={() => setOpen(true)}><MoreHorizontal size={20} /></button>
+    {open && <Dialog className="workspace-actions-dialog" labelledBy={titleId} onClose={() => setOpen(false)}>
+      <header><h2 id={titleId}>Workspace actions</h2><button type="button" className="icon-button" aria-label="Close workspace actions" onClick={() => setOpen(false)}><X size={18} /></button></header>
+      <div className="workspace-actions-list">{children}</div>
+    </Dialog>}
+  </>;
 }
 
 export function UrlForm({ initial = "", compact = false }: { initial?: string; compact?: boolean }) {

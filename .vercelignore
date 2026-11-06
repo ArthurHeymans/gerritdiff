@@ -1,0 +1,15 @@
+node_modules/
+.next/
+out/
+build/
+.git/
+.jj/
+.vercel/
+.pi-subagents/
+.env*
+!.env.example
+*.tsbuildinfo
+npm-debug.log*
+.DS_Store
+test-results/
+playwright-report/

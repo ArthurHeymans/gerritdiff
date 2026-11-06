@@ -5,6 +5,7 @@ import {
   type CodeViewItem,
   type CodeViewLineSelection,
   type CodeViewOptions,
+  type CodeViewScrollTarget,
   type DiffLineAnnotation,
   type FileDiffMetadata,
   type LineAnnotation,
@@ -19,13 +20,21 @@ import type { GitStatus, GitStatusEntry } from "@pierre/trees";
 import { FileTree, useFileTree } from "@pierre/trees/react";
 import { Check, ChevronDown, ChevronUp, CircleCheck, Columns2, Copy, ExternalLink, FileText, GitBranch, LoaderCircle, MessageSquare, PanelLeftClose, PanelLeftOpen, Pencil, Pilcrow, Quote, Reply, Rows3, Search, Send, Settings2, Terminal, Trash2, X } from "lucide-react";
 import Image from "next/image";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
+import { useReviewScroll } from "@/components/use-review-scroll";
 import { type FileSnapshotOption, MovedCodeCompare } from "@/components/moved-code-compare";
 import { RepositoryBrowser } from "@/components/repository-browser";
+import { Dialog } from "@/components/dialog";
+import { DiscussionPanel } from "@/components/discussion-panel";
+import { createReviewEditorStore, ReviewEditorContext, useReviewEditorStore, useUnsavedReviewEditor } from "@/components/review-editor-context";
 import { createCodeViewDiffOptions, textMatchRanges, textPosition, updateWhitespaceMarkers } from "@/lib/code-view";
 import { normalizeGerritServer, patchsetUrl } from "@/lib/gerrit-url";
 import { gerritDiffHref, linkifyText } from "@/lib/linkify";
 import { commentInput, commentIsOnDisplayedSide, wholeLineRange, type GerritCommentInput, type GerritTextRange, type LocalReviewComment } from "@/lib/review-comments";
+import { parseReviewDraft, reviewDraftKey } from "@/lib/review-draft";
+import { sshUsernameError } from "@/lib/ssh-user";
+import { focusReviewControl, reviewScrollTarget } from "@/lib/review-scroll";
 import type { ChangeData, GerritComment, GerritCommentLink, RelatedChange } from "@/lib/types";
 import type { GerritDiffTheme } from "@/lib/theme";
 
@@ -88,24 +97,6 @@ type ProjectUiSettings = {
   sidebarCollapsed?: boolean;
   sidebarMode?: "changed" | "repository" | "discussion";
 };
-
-const REVIEWERS_EXPANDED_STORAGE_KEY = "gerritdiff:reviewers-expanded";
-
-function readReviewersExpanded() {
-  try {
-    return window.localStorage.getItem(REVIEWERS_EXPANDED_STORAGE_KEY) === "true";
-  } catch {
-    return false;
-  }
-}
-
-function saveReviewersExpanded(expanded: boolean) {
-  try {
-    window.localStorage.setItem(REVIEWERS_EXPANDED_STORAGE_KEY, String(expanded));
-  } catch {
-    // Keep the in-memory preference when browser storage is unavailable.
-  }
-}
 
 function personDashboardHref(data: ChangeData, returnTo: string | undefined, person: { name: string; email?: string; username?: string }) {
   const owner = person.email ?? person.username ?? person.name;
@@ -332,19 +323,27 @@ function reviewCommand(host: string, port: string, user: string, project: string
 function DraftComment({
   annotation,
   itemId,
+  path,
   onCancel,
   onSave,
 }: {
   annotation: DiffLineAnnotation<CommentMetadata> | LineAnnotation<CommentMetadata>;
   itemId: string;
+  path: string;
   onCancel(itemId: string, key: string): void;
   onSave(itemId: string, key: string, message: string, unresolved: boolean): void;
 }) {
   const metadata = annotation.metadata?.kind === "draft" ? annotation.metadata : undefined;
-  const [message, setMessage] = useState(metadata?.message ?? "");
-  const [unresolved, setUnresolved] = useState(metadata?.unresolved ?? true);
   const key = metadata?.key ?? "";
+  const store = useReviewEditorStore();
+  const recovered = store?.read(key);
+  const [message, setMessage] = useState(recovered?.kind === "inline" ? recovered.message : metadata?.message ?? "");
+  const [unresolved, setUnresolved] = useState(recovered?.kind === "inline" ? recovered.unresolved ?? true : metadata?.unresolved ?? true);
   const trimmed = message.trim();
+  useUnsavedReviewEditor(key, !!trimmed || unresolved !== (metadata?.unresolved ?? true));
+  useEffect(() => {
+    if (metadata) store?.write(key, message.trim() ? { kind: "inline", key, path, message, range: metadata.range, textRange: metadata.textRange, unresolved } : null);
+  }, [key, message, metadata, path, store, unresolved]);
 
   return (
     <form
@@ -379,7 +378,7 @@ function DraftComment({
           >
             <CircleCheck size={12} /> {unresolved ? "Unresolved" : "Resolved"}
           </button>
-          <span>Ctrl ↵ to submit</span>
+          <span>Kept in this tab · save before exporting · Ctrl ↵ to save</span>
           <button type="button" className="comment-cancel" onClick={() => onCancel(itemId, key)}><X size={14} /> Cancel</button>
         </div>
       </div>
@@ -519,13 +518,27 @@ function CommentText({ comment, origin, links, returnTo }: { comment: GerritComm
   );
 }
 
-function ExistingDiscussion({ annotation, expanded, localReply, origin, links, returnTo, onToggle, onSaveReply, onDeleteReply }: { annotation: DiffLineAnnotation<CommentMetadata> | LineAnnotation<CommentMetadata>; expanded: boolean; localReply?: LocalReply; origin: string; links: GerritCommentLink[]; returnTo?: string; onToggle(key: string): void; onSaveReply(reply: LocalReply): void; onDeleteReply(key: string): void }) {
+type ExistingDiscussionProps = { annotation: DiffLineAnnotation<CommentMetadata> | LineAnnotation<CommentMetadata>; expanded: boolean; localReply?: LocalReply; origin: string; links: GerritCommentLink[]; returnTo?: string; onToggle(key: string): void; onSaveReply(reply: LocalReply): void; onDeleteReply(key: string): void };
+
+function ExistingDiscussion(props: ExistingDiscussionProps) {
+  // A recipient change must create a new editor, even when the panel itself is reused.
+  return <DiscussionThreadEditor key={props.annotation.metadata?.key} {...props} />;
+}
+
+function DiscussionThreadEditor({ annotation, expanded, localReply, origin, links, returnTo, onToggle, onSaveReply, onDeleteReply }: ExistingDiscussionProps) {
   const metadata = annotation.metadata;
-  const [replyEditor, setReplyEditor] = useState<{ message: string; resolved: boolean } | null>(null);
+  const store = useReviewEditorStore();
+  const recovered = expanded ? store?.read(`reply:${metadata?.key}`) : undefined;
+  const [replyEditor, setReplyEditor] = useState<{ message: string; resolved: boolean } | null>(() => recovered?.kind === "reply" ? { message: recovered.message, resolved: recovered.resolved } : null);
+  useEffect(() => {
+    if (replyEditor && metadata) store?.write(`reply:${metadata.key}`, replyEditor.message.trim() ? { kind: "reply", key: metadata.key, ...replyEditor } : null);
+  }, [metadata, replyEditor, store]);
+  useUnsavedReviewEditor(`reply:${metadata?.key ?? ""}`, !!replyEditor && (replyEditor.message !== (localReply?.message ?? "") || (localReply !== undefined && replyEditor.resolved !== localReply.resolved)));
   if (!metadata || metadata.kind !== "existing") return null;
   const latest = metadata.thread.comments.at(-1);
   const unresolved = latest?.unresolved ?? false;
-  const openReply = (message = "", resolved = !unresolved) => setReplyEditor({ message, resolved });
+  const confirmReplaceReply = () => !replyEditor?.message.trim() || window.confirm("Replace this unfinished reply? Save it first to keep your changes.");
+  const openReply = (message = "", resolved = !unresolved) => { if (confirmReplaceReply()) setReplyEditor({ message, resolved }); };
   const saveReply = () => {
     if (!replyEditor) return;
     const trimmed = replyEditor.message.trim();
@@ -583,8 +596,8 @@ function ExistingDiscussion({ annotation, expanded, localReply, origin, links, r
       <div className="discussion-actions">
         <button onClick={() => openReply(localReply?.message ?? "", localReply?.resolved ?? !unresolved)}><Reply size={12} /> Reply</button>
         <button onClick={() => openReply(`${(latest?.message ?? "").split("\n").map((line) => `> ${line}`).join("\n")}\n\n`, localReply?.resolved ?? !unresolved)}><Quote size={12} /> Quote</button>
-        <button onClick={() => onSaveReply({ key: metadata.key, message: "Ack", resolved: true })}><Check size={12} /> Ack</button>
-        <button onClick={() => onSaveReply({ key: metadata.key, message: "Done", resolved: true })}><CircleCheck size={12} /> Done</button>
+        <button onClick={() => { if (confirmReplaceReply()) { onSaveReply({ key: metadata.key, message: "Ack", resolved: true }); setReplyEditor(null); } }}><Check size={12} /> Ack</button>
+        <button onClick={() => { if (confirmReplaceReply()) { onSaveReply({ key: metadata.key, message: "Done", resolved: true }); setReplyEditor(null); } }}><CircleCheck size={12} /> Done</button>
       </div>
       {replyEditor !== null && (
         <form className="discussion-reply" onSubmit={(event) => { event.preventDefault(); saveReply(); }}>
@@ -595,7 +608,7 @@ function ExistingDiscussion({ annotation, expanded, localReply, origin, links, r
             </button>
             <span>Toggle whether this discussion still needs action.</span>
           </div>
-          <div><span>This reply will be included when you publish the review.</span><button type="button" onClick={() => setReplyEditor(null)}>Cancel</button><button type="submit" disabled={!replyEditor.message.trim()}>Save reply</button></div>
+          <div><span>Kept in this tab. Save before exporting.</span><button type="button" onClick={() => { store?.write(`reply:${metadata.key}`, null); setReplyEditor(null); }}>Cancel</button><button type="submit" disabled={!replyEditor.message.trim()}>Save reply</button></div>
         </form>
       )}
     </div>
@@ -725,10 +738,13 @@ function ReviewFileTree({
   const paths = useMemo(() => files.map((file) => file.name), [files]);
   const pathToId = useMemo(() => new Map(files.map((file, index) => [file.name, `file-${index}`])), [files]);
   const gitStatus = useMemo<GitStatusEntry[]>(() => files.map((file) => ({ path: file.name, status: gitStatusFor(file) })), [files]);
+  // useFileTree retains its initial callbacks; bridge to the current scroll controls.
+  const onSelectRef = useRef(onSelect);
+  useLayoutEffect(() => { onSelectRef.current = onSelect; }, [onSelect]);
   const handleSelection = useCallback((selectedPaths: readonly string[]) => {
     const id = selectedPaths.length === 1 ? pathToId.get(selectedPaths[0]) : undefined;
-    if (id) onSelect(id);
-  }, [onSelect, pathToId]);
+    if (id) onSelectRef.current(id);
+  }, [pathToId]);
   const { model } = useFileTree({
     paths,
     gitStatus,
@@ -736,7 +752,7 @@ function ReviewFileTree({
     flattenEmptyDirectories: true,
     initialExpansion: "open",
     initialVisibleRowCount: 30,
-    itemHeight: 25,
+    itemHeight: 32,
     onSelectionChange: handleSelection,
     search: true,
     stickyFolders: true,
@@ -750,8 +766,15 @@ function ReviewFileTree({
   return <FileTree model={model} className="pierre-tree" />;
 }
 
-export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, comparisonLoading = false, onPatchsetChange, onBaseChange }: { data: ChangeData; theme: GerritDiffTheme; initialThreadId?: string; dashboardReturnTo?: string; comparisonLoading?: boolean; onPatchsetChange(patchset: number, threadId?: string): void; onBaseChange(base?: number, threadId?: string): void }) {
+export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, comparisonLoading = false, onPatchsetChange: navigatePatchset, onBaseChange: navigateBase }:  { data: ChangeData; theme: GerritDiffTheme; initialThreadId?: string; dashboardReturnTo?: string; comparisonLoading?: boolean; onPatchsetChange(patchset: number, threadId?: string): void; onBaseChange(base?: number, threadId?: string): void }) {
   const viewerRef = useRef<CodeViewHandle<CommentMetadata> | null>(null);
+  const unsavedEditorsRef = useRef(new Set<string>());
+  const browseButtonRef = useRef<HTMLButtonElement>(null);
+  const stickyBrowseButtonRef = useRef<HTMLButtonElement>(null);
+  const registerUnsavedEditor = useCallback((key: string, dirty: boolean) => {
+    if (dirty) unsavedEditorsRef.current.add(key);
+    else unsavedEditorsRef.current.delete(key);
+  }, []);
   const codeViewContainerRef = useRef<HTMLDivElement | null>(null);
   const activeDraftRef = useRef<ActiveDraft | null>(null);
   const nextCommentRef = useRef(1);
@@ -768,7 +791,7 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
   const [tabSize, setTabSize] = useState(2);
   const [sidebarMode, setSidebarMode] = useState<"changed" | "repository" | "discussion">("changed");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [reviewersExpanded, setReviewersExpanded] = useState(false);
+  const [navigationOpen, setNavigationOpen] = useState(false);
   const [knownPath, setKnownPath] = useState("");
   const [repositoryError, setRepositoryError] = useState("");
   const [loadingItems, setLoadingItems] = useState<ReadonlySet<string>>(() => new Set());
@@ -787,6 +810,32 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
   const [reviewMessage, setReviewMessage] = useState("");
   const [codeReview, setCodeReview] = useState("");
   const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState("");
+  const [draftsReady, setDraftsReady] = useState(false);
+  const [draftStorageError, setDraftStorageError] = useState(false);
+  const draftKey = reviewDraftKey(data.host, data.project, data.changeNumber, data.revision, data.baseRevisionNumber);
+  const editorStore = useMemo(() => createReviewEditorStore(draftKey, () => setDraftStorageError(true)), [draftKey]);
+  const editorContext = useMemo(() => ({ register: registerUnsavedEditor, store: editorStore }), [editorStore, registerUnsavedEditor]);
+  const [restoreRepositoryPath, setRestoreRepositoryPath] = useState<string | null>(null);
+  const confirmLeaveEditor = useCallback(() => {
+    if (!unsavedEditorsRef.current.size && !scopeDraft?.message.trim()) return true;
+    return window.confirm("Leave this editor with unfinished comment text? Save it first to include your changes in the review. Continue?");
+  }, [scopeDraft]);
+  const onPatchsetChange = useCallback((patchset: number, threadId?: string) => {
+    if (confirmLeaveEditor()) navigatePatchset(patchset, threadId);
+  }, [confirmLeaveEditor, navigatePatchset]);
+  const onBaseChange = useCallback((base?: number, threadId?: string) => {
+    if (confirmLeaveEditor()) navigateBase(base, threadId);
+  }, [confirmLeaveEditor, navigateBase]);
+  useEffect(() => {
+    const guardLink = (event: MouseEvent) => {
+      const link = event.composedPath().find((node): node is HTMLAnchorElement => node instanceof HTMLAnchorElement);
+      if (!link || link.target === "_blank" || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.button !== 0) return;
+      if (!confirmLeaveEditor()) { event.preventDefault(); event.stopPropagation(); }
+    };
+    document.addEventListener("click", guardLink, true);
+    return () => document.removeEventListener("click", guardLink, true);
+  }, [confirmLeaveEditor]);
   const commitMessageContent = data.commitMessage;
   const sourceOrigin = new URL(data.sourceUrl).origin;
   // The input URL may mean "current". Snapshot requests must follow the displayed
@@ -864,6 +913,37 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
     ],
     [commitMessageContent, data.baseRevisionNumber, data.revision, data.revisionNumber, discussionThreads, files],
   );
+  const preserveOverviewPosition = useCallback((position: number, nextOverviewHeight: number) => {
+    const first = initialItems[0];
+    if (first) viewerRef.current?.scrollTo({ type: "item", id: first.id, align: "start", offset: nextOverviewHeight - position, behavior: "instant" });
+  }, [initialItems]);
+  const { mounts, attachScroll, overviewRef, stickyRef, headingRef, overviewHeight, stickyHeight, stuck, ready, returnToOverview } = useReviewScroll(codeViewContainerRef, movedCodeOpen, preserveOverviewPosition);
+  const showOverview = useCallback(() => {
+    setMovedCodeOpen(false);
+    returnToOverview();
+  }, [returnToOverview]);
+  const focusComparisonControl = useRef(false);
+  const closeFileComparison = useCallback(() => {
+    focusComparisonControl.current = true;
+    setMovedCodeOpen(false);
+  }, []);
+  useLayoutEffect(() => {
+    if (movedCodeOpen || !focusComparisonControl.current) return;
+    const scrollTop = codeViewContainerRef.current?.scrollTop ?? 0;
+    const expectedSticky = overviewHeight > 0 && scrollTop >= Math.max(1, overviewHeight - stickyHeight);
+    if (stuck !== expectedSticky) return;
+    const toolbar = stuck ? ".review-sticky-controls" : ".review-overview";
+    return focusReviewControl(
+      () => codeViewContainerRef.current?.querySelector<HTMLButtonElement>(`${toolbar} .moved-code-toggle`),
+      () => { focusComparisonControl.current = false; },
+    );
+  }, [movedCodeOpen, overviewHeight, stickyHeight, stuck]);
+  const scrollToCode = useCallback((target: CodeViewScrollTarget) => {
+    const scroll = () => viewerRef.current?.scrollTo(reviewScrollTarget(target, stickyHeight));
+    // Native dialog focus restoration must finish before navigating the background diff.
+    if (navigationOpen) requestAnimationFrame(scroll);
+    else scroll();
+  }, [navigationOpen, stickyHeight]);
   const pathToChangedId = useMemo(
     () => new Map(files.map((file, index) => [file.name, `file-${index}`])),
     [files],
@@ -907,7 +987,7 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
 
   useEffect(() => {
     const handleFindShortcut = (event: KeyboardEvent) => {
-      if (movedCodeOpen || !(event.ctrlKey || event.metaKey) || event.altKey || event.key.toLowerCase() !== "f") return;
+      if (document.querySelector("dialog:modal") || movedCodeOpen || !(event.ctrlKey || event.metaKey) || event.altKey || event.key.toLowerCase() !== "f") return;
       event.preventDefault();
       setSearchOpen(true);
       requestAnimationFrame(() => searchInputRef.current?.focus());
@@ -923,7 +1003,6 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
       setShowWhitespace(settings.showWhitespace ?? false);
       setIgnoreIndentation(settings.ignoreIndentation ?? true);
       setSidebarCollapsed(settings.sidebarCollapsed ?? false);
-      setReviewersExpanded(readReviewersExpanded());
       if (settings.sidebarMode === "repository" || settings.sidebarMode === "discussion") setSidebarMode(settings.sidebarMode);
       else setSidebarMode("changed");
       setRightPanel(null);
@@ -988,10 +1067,10 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
   useEffect(() => {
     if (!searchOpen || !searchMatches.length) return;
     const match = searchMatches[Math.min(searchIndex, searchMatches.length - 1)];
-    viewerRef.current?.scrollTo({ type: "line", id: match.itemId, lineNumber: match.lineNumber, side: match.side, align: "center" });
+    scrollToCode({ type: "line", id: match.itemId, lineNumber: match.lineNumber, side: match.side, align: "center" });
     const frame = requestAnimationFrame(() => requestAnimationFrame(refreshSearchHighlights));
     return () => cancelAnimationFrame(frame);
-  }, [refreshSearchHighlights, searchIndex, searchMatches, searchOpen]);
+  }, [refreshSearchHighlights, scrollToCode, searchIndex, searchMatches, searchOpen]);
 
   useEffect(() => {
     if (searchOpen) refreshSearchHighlights();
@@ -1136,7 +1215,95 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
     return viewer.updateItem(item) ? item : undefined;
   }, []);
 
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      try {
+        const draft = parseReviewDraft(window.sessionStorage.getItem(draftKey));
+        if (draft) {
+          setLocalReviewComments(draft.comments);
+          setLocalReplies(draft.replies);
+          setReviewMessage(draft.message);
+          setCodeReview(draft.vote);
+          nextCommentRef.current = 1 + Math.max(0, ...draft.comments.map((comment) => Number(comment.key.match(/-(\d+)$/)?.[1]) || 0));
+          for (const comment of draft.comments) {
+            if (comment.range.end === 0) continue;
+            const itemId = comment.path === "/COMMIT_MSG" ? "commit-message" : pathToChangedId.get(comment.path);
+            if (!itemId) continue;
+            updateCommentItem(itemId, (item) => {
+              const annotation = {
+                lineNumber: comment.range.end,
+                side: comment.range.endSide ?? comment.range.side ?? "additions",
+                metadata: { kind: "saved" as const, key: comment.key, author: "You", message: comment.message, range: comment.range, textRange: comment.textRange, unresolved: comment.unresolved },
+              };
+              item.annotations = [...(item.annotations ?? []).filter((entry) => entry.metadata?.key !== comment.key), annotation];
+              return true;
+            });
+          }
+        }
+        const buffers = editorStore.all();
+        for (const { value: editor } of buffers) {
+          if (editor.kind !== "inline") continue;
+          nextCommentRef.current = Math.max(nextCommentRef.current, 1 + (Number(editor.key.match(/-(\d+)$/)?.[1]) || 0));
+          const itemId = editor.path === "/COMMIT_MSG" ? "commit-message" : pathToChangedId.get(editor.path);
+          if (!itemId) continue;
+          updateCommentItem(itemId, (item) => {
+            const annotation = {
+              lineNumber: editor.range.end,
+              side: editor.range.endSide ?? editor.range.side ?? "additions",
+              metadata: { kind: "draft" as const, key: editor.key, message: editor.message, range: editor.range, textRange: editor.textRange, unresolved: editor.unresolved },
+            };
+            item.annotations = [...(item.annotations ?? []).filter((entry) => entry.metadata?.key !== editor.key), annotation];
+            return true;
+          });
+          activeDraftRef.current = { itemId, key: editor.key };
+        }
+        const latest = buffers.at(-1)?.value;
+        if (latest?.kind === "scope") {
+          setRightPanel({ kind: "scope", path: latest.path });
+          setScopeDraft({ key: latest.key, message: latest.message, resolved: latest.resolved });
+        } else if (latest?.kind === "reply") {
+          setRightPanel({ kind: "discussion", threadKey: latest.key });
+        } else if (latest?.kind === "inline" && latest.path !== "/COMMIT_MSG" && !pathToChangedId.has(latest.path)) {
+          setRestoreRepositoryPath(latest.path);
+        }
+      } catch { setDraftStorageError(true); }
+      setDraftsReady(true);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [draftKey, editorStore, pathToChangedId, updateCommentItem]);
+
+  useEffect(() => {
+    if (!draftsReady) return;
+    editorStore.write("scope", scopeDraft && commentScope && scopeDraft.message.trim()
+      ? { kind: "scope", path: commentScope, ...scopeDraft }
+      : null);
+  }, [commentScope, draftsReady, editorStore, scopeDraft]);
+
+  useEffect(() => {
+    if (!draftsReady) return;
+    try {
+      if (localReviewComments.length || localReplies.length || reviewMessage || codeReview) {
+        window.sessionStorage.setItem(draftKey, JSON.stringify({ version: 1, comments: localReviewComments, replies: localReplies, message: reviewMessage, vote: codeReview }));
+      } else window.sessionStorage.removeItem(draftKey);
+    } catch {
+      // Schedule the warning outside this effect's synchronous render cycle.
+      const frame = requestAnimationFrame(() => setDraftStorageError(true));
+      return () => cancelAnimationFrame(frame);
+    }
+  }, [codeReview, draftKey, draftsReady, localReplies, localReviewComments, reviewMessage]);
+
+  useEffect(() => {
+    const warnBeforeLeaving = (event: BeforeUnloadEvent) => {
+      if (!unsavedEditorsRef.current.size && !scopeDraft?.message.trim() && !(draftStorageError && (localReviewComments.length || localReplies.length || reviewMessage || codeReview))) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warnBeforeLeaving);
+    return () => window.removeEventListener("beforeunload", warnBeforeLeaving);
+  }, [codeReview, draftStorageError, localReplies.length, localReviewComments.length, reviewMessage, scopeDraft]);
+
   const removeComment = useCallback((itemId: string, key: string) => {
+    editorStore.write(key, null);
     let removedSaved = false;
     updateCommentItem(itemId, (item) => {
       const target = item.annotations?.find((annotation) => annotation.metadata?.key === key);
@@ -1157,7 +1324,7 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
     }
     if (activeDraftRef.current?.key === key) activeDraftRef.current = null;
     setSelectedLines(null);
-  }, [updateCommentItem]);
+  }, [editorStore, updateCommentItem]);
 
   const saveComment = useCallback((itemId: string, key: string, message: string, unresolved: boolean) => {
     const updated = updateCommentItem(itemId, (item) => {
@@ -1170,6 +1337,7 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
       return true;
     });
     if (updated) {
+      editorStore.write(key, null);
       const saved = updated.annotations?.find((annotation) => annotation.metadata?.key === key)?.metadata;
       if (saved?.kind === "saved") {
         setLocalReviewComments((comments) => [
@@ -1180,7 +1348,21 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
       activeDraftRef.current = null;
       setSelectedLines(null);
     }
-  }, [updateCommentItem]);
+  }, [editorStore, updateCommentItem]);
+
+  const cancelComment = useCallback((itemId: string, key: string) => {
+    const saved = localReviewComments.find((comment) => comment.key === key);
+    if (!saved) { removeComment(itemId, key); return; }
+    editorStore.write(key, null);
+    updateCommentItem(itemId, (item) => {
+      item.annotations = item.annotations?.map((annotation) => annotation.metadata?.key === key
+        ? { ...annotation, metadata: { kind: "saved" as const, key, author: "You", message: saved.message, range: saved.range, textRange: saved.textRange, unresolved: saved.unresolved } }
+        : annotation) as typeof item.annotations;
+      return true;
+    });
+    activeDraftRef.current = null;
+    setSelectedLines(null);
+  }, [editorStore, localReviewComments, removeComment, updateCommentItem]);
 
   const editComment = useCallback((itemId: string, key: string) => {
     const updated = updateCommentItem(itemId, (item) => {
@@ -1229,7 +1411,8 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
     }
     const key = `draft-${nextCommentRef.current++}`;
     const previous = activeDraftRef.current;
-    if (previous && previous.itemId !== itemId) removeComment(previous.itemId, previous.key);
+    if (previous && !confirmLeaveEditor()) return;
+    if (previous) cancelComment(previous.itemId, previous.key);
     const updated = updateCommentItem(itemId, (item) => {
       if (item.type === "diff") {
         const annotation: DiffLineAnnotation<CommentMetadata> = {
@@ -1252,7 +1435,7 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
       if (textRange) setSelectedLines(null);
       setCodeTextSelection(null);
     }
-  }, [removeComment, updateCommentItem]);
+  }, [cancelComment, confirmLeaveEditor, updateCommentItem]);
 
   const commentOnTextSelection = useCallback(() => {
     if (!codeTextSelection) return;
@@ -1296,12 +1479,13 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
       diffStyle,
       tabSize,
       unsafeCSS: `
+        [data-diffs-header][data-sticky] { top: var(--review-sticky-height, 0px); }
         ::highlight(${COMMENT_HIGHLIGHT_NAME}) { background-color: rgba(231, 177, 54, .38); text-decoration: underline 1px rgba(245, 198, 83, .9); text-underline-offset: 2px; }
         ::highlight(${SEARCH_HIGHLIGHT_NAME}) { color: #17131f; background-color: rgba(255, 214, 72, .72); }
         ::highlight(${ACTIVE_SEARCH_HIGHLIGHT_NAME}) { color: #17131f; background-color: #ff9f43; text-decoration: underline 2px #7a3d00; text-underline-offset: 2px; }
       `,
     }),
-    layout: { paddingTop: 0, gap: 1, paddingBottom: 0 },
+    layout: { paddingTop: overviewHeight, gap: 1, paddingBottom: 0 },
     lineHoverHighlight: "number",
     enableLineSelection: true,
     enableGutterUtility: true,
@@ -1313,15 +1497,17 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
     onGutterUtilityClick(range, context) {
       createDraft(range, context.item.id);
     },
-  }), [createDraft, diffStyle, refreshSearchHighlights, showWhitespace, tabSize, theme]);
+  }), [createDraft, diffStyle, refreshSearchHighlights, overviewHeight, showWhitespace, tabSize, theme]);
 
   const saveLocalReply = useCallback((reply: LocalReply) => {
+    editorStore.write(`reply:${reply.key}`, null);
     setLocalReplies((current) => [...current.filter((entry) => entry.key !== reply.key), reply]);
-  }, []);
+  }, [editorStore]);
 
   const deleteLocalReply = useCallback((key: string) => {
+    editorStore.write(`reply:${key}`, null);
     setLocalReplies((current) => current.filter((entry) => entry.key !== key));
-  }, []);
+  }, [editorStore]);
 
   const updateThreadUrl = useCallback((threadId?: string) => {
     const params = new URLSearchParams(window.location.search);
@@ -1332,6 +1518,8 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
   }, []);
 
   const toggleActiveDiscussion = useCallback((key: string) => {
+    if (!confirmLeaveEditor()) return;
+    setScopeDraft(null);
     if (activeThreadKey === key) {
       setRightPanel(null);
       updateThreadUrl();
@@ -1340,7 +1528,7 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
     setRightPanel({ kind: "discussion", threadKey: key });
     const thread = discussionThreads.find((candidate) => `gerrit:${candidate.key}` === key);
     updateThreadUrl(thread?.key);
-  }, [activeThreadKey, discussionThreads, updateThreadUrl]);
+  }, [activeThreadKey, confirmLeaveEditor, discussionThreads, updateThreadUrl]);
 
   const localReplyComments = useMemo<LocalReviewComment[]>(() => localReplies.flatMap((reply) => {
     const thread = discussionThreads.find((candidate) => `gerrit:${candidate.key}` === reply.key);
@@ -1391,10 +1579,15 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
   );
 
   const openCommentScope = useCallback((path: string | null) => {
-    setScopeDraft(null);
+    if (!confirmLeaveEditor()) return;
+    const closing = commentScope === path || path === null;
+    const recovered = editorStore.read("scope");
+    setScopeDraft(!closing && recovered?.kind === "scope" && recovered.path === path
+      ? { key: recovered.key, message: recovered.message, resolved: recovered.resolved }
+      : null);
     updateThreadUrl();
-    setRightPanel(commentScope === path || path === null ? null : { kind: "scope", path });
-  }, [commentScope, updateThreadUrl]);
+    setRightPanel(closing ? null : { kind: "scope", path });
+  }, [commentScope, confirmLeaveEditor, editorStore, updateThreadUrl]);
 
   const saveScopeComment = useCallback((path: string, key: string | null, message: string, resolved: boolean) => {
     const entryKey = key ?? `scope-${nextCommentRef.current++}`;
@@ -1451,19 +1644,34 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
     return `${command}\n${baseCommand}`;
   }, [codeReview, combinedReviewComments, data.baseCommitMessageLineOffset, data.baseRevisionNumber, data.changeNumber, data.commitMessageLineOffset, data.project, data.revisionNumber, data.sshHost, files, reviewMessage, sshHost, sshPort, sshUser]);
 
+  const usernameError = sshUsernameError(sshUser);
   const copyGeneratedReview = useCallback(async () => {
-    await navigator.clipboard.writeText(generatedReview);
-    window.localStorage.setItem(`gerritdiff:ssh-user:${data.host}`, sshUser.trim());
-    window.localStorage.setItem(`gerritdiff:ssh-host:${data.host}`, sshHost.trim() || data.sshHost);
-    window.localStorage.setItem(`gerritdiff:ssh-port:${data.host}`, sshPort.trim() || "29418");
-    setCopied(true);
+    const error = sshUsernameError(sshUser);
+    if (error) { setCopyError(error); return; }
+    setCopyError("");
+    try {
+      await navigator.clipboard.writeText(generatedReview);
+      setCopied(true);
+    } catch {
+      setCopied(false);
+      setCopyError("Clipboard unavailable. Select and copy the command below instead.");
+      return;
+    }
+    try {
+      window.localStorage.setItem(`gerritdiff:ssh-user:${data.host}`, sshUser.trim());
+      window.localStorage.setItem(`gerritdiff:ssh-host:${data.host}`, sshHost.trim() || data.sshHost);
+      window.localStorage.setItem(`gerritdiff:ssh-port:${data.host}`, sshPort.trim() || "29418");
+    } catch { /* Copy still succeeds when browser storage is unavailable. */ }
   }, [data.host, data.sshHost, generatedReview, sshHost, sshPort, sshUser]);
 
   const openPublishDialog = useCallback(() => {
-    setSshUser(window.localStorage.getItem(`gerritdiff:ssh-user:${data.host}`) ?? "");
-    setSshHost(window.localStorage.getItem(`gerritdiff:ssh-host:${data.host}`) ?? data.sshHost);
-    setSshPort(window.localStorage.getItem(`gerritdiff:ssh-port:${data.host}`) ?? "29418");
+    try {
+      setSshUser(window.localStorage.getItem(`gerritdiff:ssh-user:${data.host}`) ?? "");
+      setSshHost(window.localStorage.getItem(`gerritdiff:ssh-host:${data.host}`) ?? data.sshHost);
+      setSshPort(window.localStorage.getItem(`gerritdiff:ssh-port:${data.host}`) ?? "29418");
+    } catch { /* Defaults remain usable without browser storage. */ }
     setCopied(false);
+    setCopyError("");
     setPublishOpen(true);
   }, [data.host, data.sshHost]);
 
@@ -1473,9 +1681,9 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
       return <ExistingDiscussion annotation={annotation} expanded={false} localReply={localReplies.find((reply) => reply.key === annotation.metadata?.key)} origin={sourceOrigin} links={data.commentLinks} returnTo={dashboardReturnTo} onToggle={toggleActiveDiscussion} onSaveReply={saveLocalReply} onDeleteReply={deleteLocalReply} />;
     }
     return annotation.metadata.kind === "draft"
-      ? <DraftComment annotation={annotation} itemId={item.id} onCancel={removeComment} onSave={saveComment} />
+      ? <DraftComment annotation={annotation} itemId={item.id} path={item.type === "diff" ? item.fileDiff.name : item.id === "commit-message" ? "/COMMIT_MSG" : item.file.name} onCancel={cancelComment} onSave={saveComment} />
       : <SavedComment annotation={annotation} itemId={item.id} onDelete={removeComment} onSelect={toggleCommentSelection} onEdit={editComment} onToggleResolved={toggleCommentResolved} />;
-  }, [dashboardReturnTo, data.commentLinks, deleteLocalReply, editComment, localReplies, removeComment, saveComment, saveLocalReply, sourceOrigin, toggleActiveDiscussion, toggleCommentResolved, toggleCommentSelection]);
+  }, [cancelComment, dashboardReturnTo, data.commentLinks, deleteLocalReply, editComment, localReplies, removeComment, saveComment, saveLocalReply, sourceOrigin, toggleActiveDiscussion, toggleCommentResolved, toggleCommentSelection]);
 
   const renderHeaderPrefix = useCallback((item: CodeViewItem<CommentMetadata>) => {
     const disabled = item.type === "diff"
@@ -1485,8 +1693,8 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
   }, [toggleCollapsed]);
 
   const scrollToItem = useCallback((itemId: string) => {
-    viewerRef.current?.scrollTo({ type: "item", id: itemId, align: "start", behavior: "smooth" });
-  }, []);
+    scrollToCode({ type: "item", id: itemId, align: "start", behavior: "smooth" });
+  }, [scrollToCode]);
 
   const loadFullDiff = useCallback(async (itemId: string) => {
     const viewer = viewerRef.current;
@@ -1523,6 +1731,8 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
   }, [data.revision, revisionSourceUrl, loadingItems]);
 
   const selectDiscussion = useCallback(async (thread: DiscussionThread) => {
+    if (!confirmLeaveEditor()) return;
+    setScopeDraft(null);
     const key = `gerrit:${thread.key}`;
     setRightPanel({ kind: "discussion", threadKey: key });
     updateThreadUrl(thread.key);
@@ -1531,7 +1741,7 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
     if (!threadBelongsToPatchset(thread, data.revisionNumber)) {
       const patchset = threadPatchset(thread) ?? thread.comments.at(-1)?.patchSet;
       if (patchset && patchset !== data.revisionNumber) {
-        onPatchsetChange(patchset, thread.key);
+        navigatePatchset(patchset, thread.key);
         return;
       }
     }
@@ -1551,8 +1761,8 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
     await loadFullDiff(itemId);
     const range = commentRange(anchor);
     setSelectedLines(anchor.range ? null : { id: itemId, range });
-    viewerRef.current?.scrollTo({ type: "range", id: itemId, range, align: "center", behavior: "smooth" });
-  }, [data.baseRevisionNumber, data.revisionNumber, loadFullDiff, onPatchsetChange, pathToChangedId, scrollToItem, updateThreadUrl]);
+    scrollToCode({ type: "range", id: itemId, range, align: "center", behavior: "smooth" });
+  }, [confirmLeaveEditor, data.baseRevisionNumber, data.revisionNumber, loadFullDiff, navigatePatchset, pathToChangedId, scrollToCode, scrollToItem, updateThreadUrl]);
 
   useEffect(() => {
     if (!initialThreadId || openedInitialThreadRef.current === initialThreadId) return;
@@ -1590,8 +1800,21 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
       const file = await fetchFileContent(revisionSourceUrl, path);
       if (!file.exists) throw new Error(`${path} does not exist in this patchset.`);
       if (file.binary) throw new Error(`${path} is binary and cannot be displayed.`);
-      viewer.addItems([{ id: itemId, type: "file", file: { name: path, contents: file.content ?? "", cacheKey: `${data.revision}:${path}` } }]);
-      viewer.scrollTo({ type: "item", id: itemId, align: "start", behavior: "smooth" });
+      const annotations: LineAnnotation<CommentMetadata>[] = localReviewComments
+        .filter((comment) => comment.path === path && comment.range.end > 0)
+        .map((comment) => ({
+          lineNumber: comment.range.end,
+          metadata: { kind: "saved", key: comment.key, author: "You", message: comment.message, range: comment.range, textRange: comment.textRange, unresolved: comment.unresolved },
+        }));
+      for (const { value: editor } of editorStore.all()) {
+        if (editor.kind !== "inline" || editor.path !== path) continue;
+        const existing = annotations.findIndex((annotation) => annotation.metadata?.key === editor.key);
+        if (existing >= 0) annotations.splice(existing, 1);
+        annotations.push({ lineNumber: editor.range.end, metadata: { kind: "draft", key: editor.key, message: editor.message, range: editor.range, textRange: editor.textRange, unresolved: editor.unresolved } });
+        activeDraftRef.current = { itemId, key: editor.key };
+      }
+      viewer.addItems([{ id: itemId, type: "file", file: { name: path, contents: file.content ?? "", cacheKey: `${data.revision}:${path}` }, annotations }]);
+      scrollToCode({ type: "item", id: itemId, align: "start", behavior: "smooth" });
     } catch (error) {
       setRepositoryError(error instanceof Error ? error.message : `Couldn’t open ${path}.`);
     } finally {
@@ -1601,7 +1824,16 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
         return next;
       });
     }
-  }, [data.revision, revisionSourceUrl, loadingItems, pathToChangedId, scrollToItem]);
+  }, [data.revision, editorStore, revisionSourceUrl, loadingItems, localReviewComments, pathToChangedId, scrollToCode, scrollToItem]);
+
+  useEffect(() => {
+    if (!restoreRepositoryPath) return;
+    const frame = requestAnimationFrame(() => {
+      setRestoreRepositoryPath(null);
+      void openRepositoryFile(restoreRepositoryPath);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [openRepositoryFile, restoreRepositoryPath]);
 
   const renderHeaderMetadata = useCallback((item: CodeViewItem<CommentMetadata>) => {
     const path = item.type === "diff" ? item.fileDiff.name : item.id === "commit-message" ? "/COMMIT_MSG" : undefined;
@@ -1615,6 +1847,7 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
         {path && (
           <button
             className={`file-comments-button${unresolved > 0 ? " has-unresolved" : ""}${commentScope === path ? " is-open" : ""}`}
+            aria-label={total ? `${total} file comments` : "Comment on file"}
             title={total ? `${total} file-level comment${total === 1 ? "" : "s"}${unresolved ? `, ${unresolved} unresolved` : ""}` : "Comment on this file as a whole"}
             onClick={(event) => { event.preventDefault(); event.stopPropagation(); openCommentScope(path); }}
           >
@@ -1624,9 +1857,9 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
           </button>
         )}
         {item.type === "diff" && item.fileDiff.isPartial && (
-          <button className="load-full-file" disabled={loading} onClick={(event) => { event.preventDefault(); event.stopPropagation(); void loadFullDiff(item.id); }}>
+          <button className="load-full-file" aria-label={loading ? "Loading full file" : "Load full file"} title={loading ? "Loading full file…" : "Load full file"} disabled={loading} onClick={(event) => { event.preventDefault(); event.stopPropagation(); void loadFullDiff(item.id); }}>
             {loading ? <LoaderCircle className="spinner" size={12} /> : <FileText size={12} />}
-            {loading ? "Loading…" : "Load full file"}
+            <span>{loading ? "Loading…" : "Load full file"}</span>
           </button>
         )}
       </>
@@ -1672,47 +1905,91 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
 
   const sidePanelVisible = rightPanel !== null;
 
-  return (
-    <div className={`review-layout${sidebarCollapsed ? " sidebar-collapsed" : ""}${sidePanelVisible ? " with-discussion-panel" : ""}`}>
-      <aside className={`sidebar pierre-sidebar${sidebarCollapsed ? " is-collapsed" : ""}`}>
-        <button type="button" className="sidebar-collapse-toggle" onClick={() => setSidebarCollapsed((current) => { const next = !current; saveProjectUiSettings(data.host, data.project, { sidebarCollapsed: next }); return next; })} aria-label={sidebarCollapsed ? "Expand file browser" : "Collapse file browser"} title={sidebarCollapsed ? "Expand file browser" : "Collapse file browser"}>
-          {sidebarCollapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
-        </button>
-        <div className="sidebar-tabs">
+  const navigationContent = <>
+        <div className="sidebar-tabs" aria-label="Browse change">
           <button className={sidebarMode === "changed" ? "active" : ""} onClick={() => { setSidebarMode("changed"); saveProjectUiSettings(data.host, data.project, { sidebarMode: "changed" }); }}>Changed <b>{files.length}</b></button>
           <button className={sidebarMode === "repository" ? "active" : ""} onClick={() => { setSidebarMode("repository"); saveProjectUiSettings(data.host, data.project, { sidebarMode: "repository" }); }}>Repository</button>
           <button className={sidebarMode === "discussion" ? "active" : ""} onClick={() => { setSidebarMode("discussion"); saveProjectUiSettings(data.host, data.project, { sidebarMode: "discussion" }); }} title={`${currentDiscussionCount} on this patchset, ${discussionThreads.length} total`}>Discussion <b>{currentDiscussionCount}/{discussionThreads.length}</b></button>
         </div>
-        {sidebarMode === "changed" && <ReviewFileTree files={files} onSelect={scrollToItem} />}
-        {sidebarMode === "repository" && <RepositoryBrowser changedFiles={files} sourceUrl={revisionSourceUrl} onOpenFile={openRepositoryFile} />}
-        {sidebarMode === "discussion" && <DiscussionSidebar threads={discussionThreads} revisionNumber={data.revisionNumber} onSelect={(thread) => void selectDiscussion(thread)} />}
+        {sidebarMode === "changed" && <ReviewFileTree files={files} onSelect={(itemId) => { setNavigationOpen(false); scrollToItem(itemId); }} />}
+        {sidebarMode === "repository" && <RepositoryBrowser changedFiles={files} sourceUrl={revisionSourceUrl} onOpenFile={(path) => { setNavigationOpen(false); void openRepositoryFile(path); }} />}
+        {sidebarMode === "discussion" && <DiscussionSidebar threads={discussionThreads} revisionNumber={data.revisionNumber} onSelect={(thread) => { setNavigationOpen(false); void selectDiscussion(thread); }} />}
         {sidebarMode === "repository" && (
-          <form className="known-path-form" onSubmit={(event) => { event.preventDefault(); const path = knownPath.trim().replace(/^\/+/, ""); if (path) void openRepositoryFile(path); }}>
-            <input value={knownPath} onChange={(event) => setKnownPath(event.target.value)} placeholder="Open a known path…" />
+          <form className="known-path-form" onSubmit={(event) => { event.preventDefault(); const path = knownPath.trim().replace(/^\/+/, ""); if (path) { setNavigationOpen(false); void openRepositoryFile(path); } }}>
+            <input aria-label="Repository file path" value={knownPath} onChange={(event) => setKnownPath(event.target.value)} placeholder="Open a known path…" />
             <button type="submit" disabled={!knownPath.trim()}>Open</button>
           </form>
         )}
         <SidebarDiffStats files={files} additions={data.insertions} deletions={data.deletions} />
+      </>;
+
+  const renderReviewToolbar = (sticky: boolean) => (
+    <div className="diff-toolbar pierre-toolbar">
+      <button type="button" ref={sticky ? stickyBrowseButtonRef : browseButtonRef} className="browse-change-button" aria-haspopup="dialog" onClick={() => setNavigationOpen(true)}><PanelLeftOpen size={16} /><span>Browse</span></button>
+      <span className="files-changed-label"><strong>{files.length}</strong> files changed</span>
+      {localCommentCount > 0 && <button type="button" className="comment-count" onClick={openPublishDialog} title="Drafts are not published to Gerrit">{localCommentCount} unpublished draft{localCommentCount === 1 ? "" : "s"}</button>}
+      <button type="button" className={`moved-code-toggle${movedCodeOpen ? " active" : ""}`} aria-pressed={movedCodeOpen} title="Compare the old state of one file with the new state of another" onClick={() => { if (movedCodeOpen) closeFileComparison(); else setMovedCodeOpen(true); setSearchOpen(false); setSearchQuery(""); setCodeTextSelection(null); }}><Columns2 size={13} /> Compare files</button>
+      {!movedCodeOpen && <div className="diff-layout-buttons" aria-label="Diff layout">
+        <button type="button" className={diffStyle === "split" ? "active" : ""} aria-pressed={diffStyle === "split"} onClick={() => { setDiffStyle("split"); saveProjectUiSettings(data.host, data.project, { diffStyle: "split" }); }}><Columns2 size={13} /> Side by side</button>
+        <button type="button" className={diffStyle === "unified" ? "active" : ""} aria-pressed={diffStyle === "unified"} onClick={() => { setDiffStyle("unified"); saveProjectUiSettings(data.host, data.project, { diffStyle: "unified" }); }}><Rows3 size={13} /> Unified</button>
+      </div>}
+      <details className="view-settings">
+        <summary title="Diff display settings"><Settings2 size={14} /><span>View</span><ChevronDown className="view-settings-chevron" size={12} /></summary>
+        <div className="view-settings-menu">
+          {!movedCodeOpen && <div className="view-settings-row view-layout-setting"><span>Layout</span><div>
+            <button type="button" className={diffStyle === "split" ? "active" : ""} aria-pressed={diffStyle === "split"} onClick={() => { setDiffStyle("split"); saveProjectUiSettings(data.host, data.project, { diffStyle: "split" }); }}><Columns2 size={13} /> Side by side</button>
+            <button type="button" className={diffStyle === "unified" ? "active" : ""} aria-pressed={diffStyle === "unified"} onClick={() => { setDiffStyle("unified"); saveProjectUiSettings(data.host, data.project, { diffStyle: "unified" }); }}><Rows3 size={13} /> Unified</button>
+          </div></div>}
+          {movedCodeOpen && <label className="view-settings-row"><span>Ignore indentation</span><input type="checkbox" checked={ignoreIndentation} onChange={(event) => { setIgnoreIndentation(event.target.checked); saveProjectUiSettings(data.host, data.project, { ignoreIndentation: event.target.checked }); }} /></label>}
+          <label className="view-settings-row"><span><Pilcrow size={13} /> Show whitespace</span><input type="checkbox" checked={showWhitespace} onChange={(event) => { setShowWhitespace(event.target.checked); saveProjectUiSettings(data.host, data.project, { showWhitespace: event.target.checked }); }} /></label>
+          <label className="view-settings-row"><span>Tab size</span><select aria-label="Tab size" value={tabSize} onChange={(event) => { const nextTabSize = Number(event.target.value); setTabSize(nextTabSize); saveProjectUiSettings(data.host, data.project, { tabSize: nextTabSize }); }}><option value={2}>2 spaces</option><option value={4}>4 spaces</option><option value={8}>8 spaces</option></select></label>
+        </div>
+      </details>
+      <span className="summary-add">+{data.insertions}</span><span className="summary-del">−{data.deletions}</span>
+    </div>
+  );
+
+  return (
+    <ReviewEditorContext.Provider value={editorContext}>
+    <div data-review-revision={data.revisionNumber} aria-busy={comparisonLoading || !draftsReady || !ready} className={`review-layout${sidebarCollapsed ? " sidebar-collapsed" : ""}${sidePanelVisible ? " with-discussion-panel" : ""}`}>
+      <aside className={`sidebar pierre-sidebar${sidebarCollapsed ? " is-collapsed" : ""}`} aria-label="Files and discussions">
+        <button type="button" className="sidebar-collapse-toggle" onClick={() => setSidebarCollapsed((current) => { const next = !current; saveProjectUiSettings(data.host, data.project, { sidebarCollapsed: next }); return next; })} aria-label={sidebarCollapsed ? "Expand file browser" : "Collapse file browser"} title={sidebarCollapsed ? "Expand file browser" : "Collapse file browser"}>
+          {sidebarCollapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
+        </button>
+        {navigationContent}
       </aside>
+      {navigationOpen && <Dialog className="navigation-drawer" labelledBy="navigation-title" onClose={() => setNavigationOpen(false)}>
+        <header><h2 id="navigation-title">Files & discussions</h2><button type="button" className="icon-button" aria-label="Close file browser" onClick={() => setNavigationOpen(false)}><X size={18} /></button></header>
+        <div className="navigation-drawer-body">{navigationContent}</div>
+      </Dialog>}
 
       <section className="change-main pierre-main">
+        {mounts && createPortal(<div ref={overviewRef} className="review-overview" aria-hidden={stuck} inert={stuck}>
         <div className="change-header">
           <div className="change-title-row">
+            <div className="change-title-group">
             <div className="change-kicker">
               <span className={`change-status ${data.status.toLowerCase().replaceAll(" ", "-")}`}>{data.status}</span>
-              <span>{data.project}</span><span>/</span><span>change {data.changeNumber}</span>
+              <span title={data.project}>{data.project}</span><span>/</span><span>change {data.changeNumber}</span>
             </div>
-            <h1 title={data.subject}>{data.subject}</h1>
-            <button type="button" className="publish-review-button header-review-button" onClick={openPublishDialog} title="Publish review" aria-label="Publish review">
-              <Send size={13} /> <span>Publish review</span>
+            <h1 ref={headingRef} tabIndex={-1}>{data.subject}</h1>
+            </div>
+            <div className="change-primary-actions">
+            <button type="button" className="publish-review-button header-review-button" disabled={comparisonLoading || !draftsReady} onClick={openPublishDialog} title="Review drafts and export an SSH command" aria-label="Export review">
+              <Send size={15} /> <span>Export review{localCommentCount > 0 ? ` (${localCommentCount})` : ""}</span>
             </button>
+            </div>
           </div>
+          <div className="change-details-content">
           <div className="change-meta">
+            <div className="change-author-meta">
             <span className="avatar" style={data.owner.avatarUrl ? { backgroundImage: `url(${data.owner.avatarUrl})` } : undefined}>{data.owner.avatarUrl ? null : initials}</span>
             {changeOwnerDashboardHref ? <a className="person-dashboard-link" href={changeOwnerDashboardHref}>{data.owner.name}</a> : <strong>{data.owner.name}</strong>}
             <span>updated {new Intl.DateTimeFormat("en", { dateStyle: "medium" }).format(new Date(data.updated))}</span>
             <span className="separator">•</span>
             <GitBranch size={14} /><code>{data.branch}</code>
+            </div>
+            <div className="change-review-controls">
             <div className="patchset-picker">
               <span>Base</span>
               <select aria-label="Base patchset" value={data.baseRevisionNumber ?? "parent"} disabled={comparisonLoading} onChange={(event) => onBaseChange(event.target.value === "parent" ? undefined : Number(event.target.value))}>
@@ -1731,6 +2008,8 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
                 aria-expanded={relationPanelOpen}
                 title={`${data.relationChain.length} changes in the relation chain`}
                 onClick={() => {
+                  if (!confirmLeaveEditor()) return;
+                  setScopeDraft(null);
                   updateThreadUrl();
                   setRightPanel(relationPanelOpen ? null : { kind: "relation" });
                 }}
@@ -1764,17 +2043,12 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
               </span>
             )}
           </div>
-          <div className={`reviewers-summary${reviewersExpanded ? " is-expanded" : ""}`} aria-label="Current reviewers and votes">
-            <button type="button" className="reviewers-toggle" aria-expanded={reviewersExpanded} onClick={() => setReviewersExpanded((current) => {
-              const next = !current;
-              saveReviewersExpanded(next);
-              return next;
-            })}>
-              <span className="reviewers-label">Reviewers</span>
-              <b>{reviewers.length}</b>
-              <ChevronDown size={12} />
-            </button>
-            {reviewersExpanded && (
+          </div>
+          <section className="review-context" aria-labelledby="review-context-title">
+            <div className="review-context-heading"><h2 id="review-context-title">Review context</h2><span>{reviewers.length} reviewer{reviewers.length === 1 ? "" : "s"} · {checks.length} check{checks.length === 1 ? "" : "s"}</span>{checks.some((check) => check.result !== "SUCCESS") && <b className="checks-warning">Checks need attention</b>}</div>
+          <div className="reviewers-summary" aria-label="Current reviewers and votes">
+            <span className="reviewers-label">Reviewers</span>
+            {(
               <div className="reviewers-list">
                 {reviewers.length ? reviewers.map((reviewer, index) => {
                   const reviewerInitials = reviewer.name.split(/\s+/).slice(0, 2).map((word) => word[0]).join("").toUpperCase();
@@ -1811,7 +2085,12 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
               ))}
             </div>
           )}
+          </section>
+          </div>
         </div>
+        {(localCommentCount > 0 || reviewMessage || codeReview) && <div className="review-draft-status" role="status">{draftStorageError ? "Draft recovery unavailable — keep this page open." : "Drafts saved in this tab"}<span> · Not published to Gerrit</span></div>}
+        {renderReviewToolbar(false)}
+        </div>, mounts.overview)}
         {repositoryError && <div className="repository-error"><X size={13} /> <span>{repositoryError}</span><button onClick={() => setRepositoryError("")} aria-label="Dismiss"><X size={12} /></button></div>}
         {searchOpen && (
           <form
@@ -1847,82 +2126,21 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
             <button type="button" aria-label="Close search" onClick={() => { setSearchOpen(false); setSearchQuery(""); }}><X size={13} /></button>
           </form>
         )}
-        <div className="diff-toolbar pierre-toolbar">
-          <span><strong>{files.length}</strong> files changed</span>
-          <span className="comment-hint"><MessageSquare size={13} /> Select lines or click <b>+</b> in the gutter to comment</span>
-          {localCommentCount > 0 && <span className="comment-count">{localCommentCount} local comment{localCommentCount === 1 ? "" : "s"}</span>}
-          <button
-            type="button"
-            className={`moved-code-toggle${movedCodeOpen ? " active" : ""}`}
-            aria-pressed={movedCodeOpen}
-            title="Compare the old state of one file with the new state of another"
-            onClick={() => {
-              setMovedCodeOpen((current) => !current);
-              setSearchOpen(false);
-              setSearchQuery("");
-              setCodeTextSelection(null);
-            }}
-          >
-            <Columns2 size={13} /> Compare files
-          </button>
-          {!movedCodeOpen && (
-            <div className="diff-layout-buttons" aria-label="Diff layout">
-              <button type="button" className={diffStyle === "split" ? "active" : ""} aria-pressed={diffStyle === "split"} onClick={() => { setDiffStyle("split"); saveProjectUiSettings(data.host, data.project, { diffStyle: "split" }); }}><Columns2 size={13} /> Side by side</button>
-              <button type="button" className={diffStyle === "unified" ? "active" : ""} aria-pressed={diffStyle === "unified"} onClick={() => { setDiffStyle("unified"); saveProjectUiSettings(data.host, data.project, { diffStyle: "unified" }); }}><Rows3 size={13} /> Unified</button>
-            </div>
-          )}
-          <details className="view-settings">
-            <summary title="Diff display settings">
-              <Settings2 size={14} />
-              <span>View</span>
-              <ChevronDown className="view-settings-chevron" size={12} />
-            </summary>
-            <div className="view-settings-menu">
-              {!movedCodeOpen && (
-                <div className="view-settings-row view-layout-setting">
-                  <span>Layout</span>
-                  <div>
-                    <button type="button" className={diffStyle === "split" ? "active" : ""} aria-pressed={diffStyle === "split"} onClick={() => { setDiffStyle("split"); saveProjectUiSettings(data.host, data.project, { diffStyle: "split" }); }}><Columns2 size={13} /> Side by side</button>
-                    <button type="button" className={diffStyle === "unified" ? "active" : ""} aria-pressed={diffStyle === "unified"} onClick={() => { setDiffStyle("unified"); saveProjectUiSettings(data.host, data.project, { diffStyle: "unified" }); }}><Rows3 size={13} /> Unified</button>
-                  </div>
-                </div>
-              )}
-              {movedCodeOpen && (
-                <label className="view-settings-row">
-                  <span>Ignore indentation</span>
-                  <input type="checkbox" checked={ignoreIndentation} onChange={(event) => { setIgnoreIndentation(event.target.checked); saveProjectUiSettings(data.host, data.project, { ignoreIndentation: event.target.checked }); }} />
-                </label>
-              )}
-              <label className="view-settings-row">
-                <span><Pilcrow size={13} /> Show whitespace</span>
-                <input type="checkbox" checked={showWhitespace} onChange={(event) => { setShowWhitespace(event.target.checked); saveProjectUiSettings(data.host, data.project, { showWhitespace: event.target.checked }); }} />
-              </label>
-              <label className="view-settings-row">
-                <span>Tab size</span>
-                <select
-                  aria-label="Tab size"
-                  value={tabSize}
-                  onChange={(event) => {
-                    const nextTabSize = Number(event.target.value);
-                    setTabSize(nextTabSize);
-                    saveProjectUiSettings(data.host, data.project, { tabSize: nextTabSize });
-                  }}
-                >
-                  <option value={2}>2 spaces</option>
-                  <option value={4}>4 spaces</option>
-                  <option value={8}>8 spaces</option>
-                </select>
-              </label>
-            </div>
-          </details>
-          <span className="summary-add">+{data.insertions}</span>
-          <span className="summary-del">−{data.deletions}</span>
-        </div>
         <WorkerPoolContextProvider poolOptions={WORKER_POOL_OPTIONS} highlighterOptions={WORKER_HIGHLIGHTER_OPTIONS}>
-          <div className="review-code-surface">
+          <div className={`review-code-surface${movedCodeOpen ? " is-comparing" : ""}`} style={{ "--review-sticky-height": `${stickyHeight}px` } as CSSProperties}>
+            {mounts && createPortal(<div ref={stickyRef} className="review-sticky-controls" aria-hidden={!stuck} inert={!stuck}>
+              <div className="review-sticky-titlebar">
+                <button type="button" className="back-to-change" aria-label="Back to change details" title={data.subject} onClick={showOverview}><ChevronUp size={16} /><span>{data.subject}</span></button>
+                <span className="sticky-patchset">{data.baseRevisionNumber !== undefined ? `PS ${data.baseRevisionNumber} → ${data.revisionNumber}` : `PS ${data.revisionNumber}`}</span>
+                {checks.some((check) => check.result !== "SUCCESS") && <button type="button" className="sticky-checks-warning" title="Checks need attention" aria-label="Checks need attention" onClick={showOverview}>!</button>}
+                {comparisonLoading && <LoaderCircle className="spinner" size={14} aria-label="Loading patchset" />}
+                <button type="button" className="publish-review-button header-review-button" disabled={comparisonLoading || !draftsReady} onClick={openPublishDialog} aria-label="Export review"><Send size={15} /><span>Export{localCommentCount > 0 ? ` (${localCommentCount})` : ""}</span></button>
+              </div>
+              {renderReviewToolbar(true)}
+            </div>, mounts.sticky)}
             <CodeView<CommentMetadata>
               ref={viewerRef}
-              containerRef={codeViewContainerRef}
+              containerRef={attachScroll}
               initialItems={initialItems}
               className="pierre-code-view"
               options={options}
@@ -1944,7 +2162,7 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
                 tabSize={tabSize}
                 showWhitespace={showWhitespace}
                 ignoreIndentation={ignoreIndentation}
-                onClose={() => setMovedCodeOpen(false)}
+                onClose={closeFileComparison}
               />
             )}
           </div>
@@ -1965,7 +2183,7 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
       </section>
 
       {sidePanelVisible && (
-        <aside className="discussion-panel" aria-label={relationPanelOpen ? "Relation chain" : commentScope ? scopeLabel(commentScope) : "Selected discussion"}>
+        <DiscussionPanel label={relationPanelOpen ? "Relation chain" : commentScope ? scopeLabel(commentScope) : "Selected discussion"} onClose={() => { if (confirmLeaveEditor()) { setScopeDraft(null); setRightPanel(null); updateThreadUrl(); } }} returnFocus={() => { if (window.matchMedia("(max-width: 800px)").matches) (stuck ? stickyBrowseButtonRef : browseButtonRef).current?.focus(); }}>
           <div className="discussion-panel-head">
             <div>
               <span>{relationPanelOpen ? "Relation chain" : commentScope ? scopeLabel(commentScope) : "Discussion"}</span>
@@ -1975,7 +2193,7 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
                   ? `${commentScope === "/PATCHSET_LEVEL" ? `Patchset ${data.revisionNumber}` : commentScope} · ${scopeThreads.length} thread${scopeThreads.length === 1 ? "" : "s"}${scopeDrafts.length ? `, ${scopeDrafts.length} draft` : ""}`
                   : `${activeThread?.comments.length ?? 0} comment${activeThread?.comments.length === 1 ? "" : "s"}`}</strong>
             </div>
-            <button type="button" onClick={() => { setRightPanel(null); updateThreadUrl(); }} aria-label="Close side panel"><X size={15} /></button>
+            <button type="button" onClick={() => { if (confirmLeaveEditor()) { setScopeDraft(null); setRightPanel(null); updateThreadUrl(); } }} aria-label="Close side panel"><X size={15} /></button>
           </div>
           <div className={`discussion-panel-body${commentScope && !relationPanelOpen ? " patchset-discussion-list" : ""}`}>
             {relationPanelOpen ? <RelationChainPanel relations={data.relationChain} /> : null}
@@ -2010,7 +2228,7 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
                     </div>
                     <p>{comment.message}</p>
                     <div className="discussion-actions">
-                      <button onClick={() => setScopeDraft({ key: comment.key, message: comment.message, resolved: !comment.unresolved })}>Edit</button>
+                      <button onClick={() => { if (confirmLeaveEditor()) setScopeDraft({ key: comment.key, message: comment.message, resolved: !comment.unresolved }); }}>Edit</button>
                       <button onClick={() => deleteScopeComment(comment.key)}>Discard</button>
                     </div>
                   </div>
@@ -2032,7 +2250,7 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
                       <span>Unresolved comments block until someone marks them done.</span>
                     </div>
                     <div>
-                      <span>{commentScope === "/PATCHSET_LEVEL" ? <>Sent as a <code>/PATCHSET_LEVEL</code> comment when you publish.</> : <>Sent as a file comment on <code>{commentScope}</code> when you publish.</>}</span>
+                      <span>Local draft only. Export and run the SSH command to publish.</span>
                       <button type="button" onClick={() => setScopeDraft(null)}>Cancel</button>
                       <button type="submit" disabled={!scopeDraft.message.trim()}>Save comment</button>
                     </div>
@@ -2063,28 +2281,46 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
                 origin={sourceOrigin}
                 links={data.commentLinks}
                 returnTo={dashboardReturnTo}
-                onToggle={() => { setRightPanel(null); updateThreadUrl(); }}
+                onToggle={() => { if (confirmLeaveEditor()) { setScopeDraft(null); setRightPanel(null); updateThreadUrl(); } }}
                 onSaveReply={saveLocalReply}
                 onDeleteReply={deleteLocalReply}
               />
             ) : null}
           </div>
-        </aside>
+        </DiscussionPanel>
       )}
 
       {publishOpen && (
-        <div className="publish-review-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPublishOpen(false); }}>
-          <section className="publish-review-dialog" role="dialog" aria-modal="true" aria-labelledby="publish-review-title">
+          <Dialog className="publish-review-dialog" labelledBy="publish-review-title" onClose={() => setPublishOpen(false)}>
             <header>
-              <div><Terminal size={16} /><span><strong id="publish-review-title">Publish review over SSH</strong><small>Copy and run this command in your terminal.</small></span></div>
+              <div><Terminal size={18} /><span><strong id="publish-review-title">Export review to Gerrit</strong><small>Change {data.changeNumber} · patchset {data.revisionNumber}</small></span></div>
               <button type="button" onClick={() => setPublishOpen(false)} aria-label="Close publish dialog"><X size={16} /></button>
             </header>
+            <div className="export-body">
+            <div className="draft-notice">
+              <strong>Nothing has been published.</strong>
+              <ol><li>Check your saved comments and SSH details.</li><li>Copy the command and run it in your terminal to publish.</li></ol>
+              <span>GerritDiff never sends reviews from the browser.</span>
+            </div>
+            {(localCommentCount > 0 || reviewMessage || codeReview) && <button type="button" className="discard-review-drafts" onClick={() => {
+              if (!window.confirm("Clear all saved drafts for this comparison? This does not change anything already published to Gerrit.")) return;
+              for (const comment of localReviewComments) {
+                const itemId = comment.path === "/COMMIT_MSG" ? "commit-message" : pathToChangedId.get(comment.path) ?? `repo:${comment.path}`;
+                if (itemId) removeComment(itemId, comment.key);
+              }
+              setLocalReviewComments([]);
+              setLocalReplies([]);
+              setReviewMessage("");
+              setCodeReview("");
+              setCopied(false);
+              setCopyError("");
+            }}>Clear saved drafts…</button>}
             <div className="publish-review-fields">
-              <label><span>SSH username</span><input value={sshUser} onChange={(event) => { setSshUser(event.target.value); setCopied(false); }} placeholder="YOUR_USERNAME" /></label>
+              <label className="ssh-username-field"><span>SSH username</span><input aria-label="SSH username" value={sshUser} onChange={(event) => { setSshUser(event.target.value); setCopied(false); setCopyError(""); }} placeholder="Your Gerrit username" autoComplete="username" autoCapitalize="none" spellCheck={false} aria-invalid={!!usernameError} aria-describedby="ssh-username-help" /><small id="ssh-username-help">{usernameError ?? "Use your Gerrit SSH login, not your display name."}</small></label>
               <label><span>SSH host</span><input value={sshHost} onChange={(event) => { setSshHost(event.target.value); setCopied(false); }} /></label>
               <label><span>SSH port</span><input value={sshPort} onChange={(event) => { setSshPort(event.target.value); setCopied(false); }} inputMode="numeric" /></label>
               <label className="publish-review-vote"><span>Code-Review</span><select value={codeReview} onChange={(event) => { setCodeReview(event.target.value); setCopied(false); }}><option value="">No vote</option><option value="-2">-2</option><option value="-1">-1</option><option value="0">0</option><option value="1">+1</option><option value="2">+2</option></select></label>
-              <label className="publish-review-message"><span>Cover message</span><textarea value={reviewMessage} onChange={(event) => { setReviewMessage(event.target.value); setCopied(false); }} placeholder="Optional message posted alongside your vote…" /><small>Posted as the change message. For something that can be resolved and replied to, use a patchset comment instead.</small></label>
+              <label className="publish-review-message"><span>Cover message</span><textarea aria-label="Cover message" aria-describedby="cover-message-help" value={reviewMessage} onChange={(event) => { setReviewMessage(event.target.value); setCopied(false); }} placeholder="Optional message posted alongside your vote…" /><small id="cover-message-help">Posted as the change message. For something that can be resolved and replied to, use a patchset comment instead.</small></label>
             </div>
             {combinedReviewComments.length > 0 && (
               <div className="publish-review-summary">
@@ -2112,13 +2348,22 @@ export function ChangeReview({ data, theme, initialThreadId, dashboardReturnTo, 
               </div>
             )}
             <div className="publish-review-code">
-              <div><span>{data.host} · change {data.changeNumber}, patchset {data.revisionNumber}</span><button type="button" onClick={() => void copyGeneratedReview()}><Copy size={13} /> {copied ? "Copied" : "Copy command"}</button></div>
-              <pre><code>{generatedReview}</code></pre>
+              <div><span>Command preview · {data.host}</span></div>
+              <pre tabIndex={0} aria-label="Review SSH command"><code>{generatedReview}</code></pre>
             </div>
-            <p>The command sends Gerrit a <code>ReviewInput</code> JSON document on stdin, including local inline comments and replies. Comments are keyed by file path; <code>/PATCHSET_LEVEL</code> is Gerrit&rsquo;s reserved path for change-wide comments that aren&rsquo;t attached to a file, and <code>/COMMIT_MSG</code> targets the commit message. When you compare two patchsets, comments on the left-hand side belong to the base patchset, so they are sent as a second command.</p>
-          </section>
-        </div>
+            <details className="export-technical-details">
+              <summary>Command details & draft recovery</summary>
+              <p>The command sends Gerrit a <code>ReviewInput</code> JSON document on stdin. <code>/PATCHSET_LEVEL</code> holds change-wide comments; <code>/COMMIT_MSG</code> targets the commit message. When comparing patchsets, new comments on the base side are sent as a second command.</p>
+              <p>{draftStorageError ? "Browser storage is unavailable. Keep this page open until you have copied your review." : "Saved drafts and unfinished editor text recover in this tab across reloads and Back/Forward. Save each comment or reply before exporting; unfinished text is not included."}</p>
+            </details>
+            </div>
+            <footer className="export-actions">
+              <p className={copyError ? "copy-feedback is-error" : "copy-feedback"} role="status">{copyError || usernameError || (copied ? "Command copied — not published. Run it in your terminal, then check Gerrit for confirmation." : "Requires Gerrit SSH access. Inspect the command before running it.")}</p>
+              <button type="button" disabled={!!usernameError} aria-describedby="ssh-username-help" onClick={() => void copyGeneratedReview()}><Copy size={16} /> {copied ? "Copy again" : "Copy command"}</button>
+            </footer>
+          </Dialog>
       )}
     </div>
+    </ReviewEditorContext.Provider>
   );
 }

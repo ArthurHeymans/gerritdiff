@@ -258,7 +258,7 @@ export function MovedCodeCompare({
 
   useEffect(() => {
     const handleFindShortcut = (event: KeyboardEvent) => {
-      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.key.toLowerCase() !== "f") return;
+      if (document.querySelector("dialog:modal") || !(event.ctrlKey || event.metaKey) || event.altKey || event.key.toLowerCase() !== "f") return;
       event.preventDefault();
       setSearchOpen(true);
       requestAnimationFrame(() => searchInputRef.current?.focus());

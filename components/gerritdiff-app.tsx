@@ -3,7 +3,7 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { ExternalLink, LayoutDashboard, LoaderCircle } from "lucide-react";
-import { HomeLink, Logo, ThemeButton, UrlForm } from "@/components/app-chrome";
+import { HomeLink, Logo, ThemeButton, UrlForm, WorkspaceActions } from "@/components/app-chrome";
 import { ChangeReview } from "@/components/change-review";
 import { Dashboard, DashboardProfileForm } from "@/components/dashboard";
 import { normalizeGerritServer, patchsetUrl } from "@/lib/gerrit-url";
@@ -105,6 +105,7 @@ function Viewer({ data, initialThreadId, loading, returnTo }: { data: ChangeData
         <HomeLink />
         <UrlForm initial={data.sourceUrl} compact />
         <div className="topbar-actions">
+          <WorkspaceActions>
           {returnTo && <a className="source-link dashboard-return" href={returnTo} onClick={(event) => {
             if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
             event.preventDefault();
@@ -112,6 +113,7 @@ function Viewer({ data, initialThreadId, loading, returnTo }: { data: ChangeData
           }}><LayoutDashboard size={14} /> Dashboard</a>}
           <a className="source-link" href={data.sourceUrl} target="_blank" rel="noreferrer">Gerrit <ExternalLink size={14} /></a>
           <ThemeButton />
+          </WorkspaceActions>
         </div>
       </header>
       <ChangeReview key={`${data.revision}:${data.baseRevisionNumber ?? "parent"}`} data={data} theme={theme} initialThreadId={initialThreadId} dashboardReturnTo={returnTo} comparisonLoading={loading} onPatchsetChange={openPatchset} onBaseChange={(base, threadId) => openComparison(data.revisionNumber, base, threadId)} />

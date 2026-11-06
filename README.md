@@ -20,7 +20,9 @@ A fast, focused diff viewer for public Gerrit changes, inspired by [DiffsHub](ht
 - Unified and side-by-side diff layouts
 - Existing Gerrit discussions grouped by current and historical patchsets
 - Line and range comments using Pierre annotations and gutter utilities
-- Copyable `gerrit review --json` SSH command for publishing comments, replies, a review message, and a Code-Review vote
+- Explicit review export with a copyable `gerrit review --json` SSH command; nothing is published until you run it
+- Tab-scoped recovery of saved drafts and unfinished comment/reply editors, isolated by patchset comparison
+- Mobile file/discussion navigation and keyboard-accessible modal actions
 - Dark and light Pierre themes
 - Basic SSRF protection for the public proxy
 
@@ -32,6 +34,37 @@ npm run dev
 ```
 
 Open <http://localhost:3000>.
+
+### Tests
+
+```bash
+npm test
+npm run lint
+npx playwright install chromium
+npm run test:browser
+```
+
+Browser tests start a local server on port 3210 and use mocked Gerrit responses;
+they never publish reviews. They cover light/dark themes, narrow layouts, keyboard
+focus, draft recovery, navigation guards, and clipboard failure. Set `CHROMIUM_PATH`
+to use an existing browser executable. Screenshots and traces are written to
+`test-results/` (ignored by Git). If the app is already running locally, use
+`PLAYWRIGHT_PORT=3000 npm run test:browser` to reuse it rather than starting a
+second Next.js development server.
+
+The change overview and diff share one scrolling surface on desktop and mobile.
+As the overview scrolls away, a compact title, patchset, Export action, and review
+toolbar stay at the top. Scroll back up or click the compact title to return to
+the full details. The desktop file browser scrolls independently.
+
+Installation applies a small, guarded Pierre 1.2.12 virtualization padding fix in
+`scripts/patch-pierre-diffs.mjs`; re-evaluate it when upgrading the dependency.
+
+Saved review drafts live in this browser tab's session storage, not on Gerrit.
+Unfinished editor text is recovered after reloads and Back/Forward navigation;
+editor switching and patchset/link navigation also warn before replacing active
+writing. Save each comment or reply to include it in an export. After running
+an exported review, verify it in Gerrit, then clear the saved drafts if desired.
 
 ## Production
 
